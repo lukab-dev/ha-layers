@@ -1,0 +1,36 @@
+{
+  "entity": {
+    "switch": {
+      "apply": {
+        "default": "mdi:layers",
+        "state": {
+          "off": "mdi:layers-off"
+        }
+      }
+    },
+    "sensor": {
+      "status": {
+        "default": "mdi:layers-triple",
+        "state": {
+          "pending": "mdi:layers-triple-outline",
+          "failed": "mdi:layers-remove",
+          "shadow": "mdi:layers-off-outline"
+        }
+      }
+    }
+  },
+  "services": {
+    "set": {
+      "service": "mdi:layers-plus"
+    },
+    "clear": {
+      "service": "mdi:layers-minus"
+    },
+    "sync": {
+      "service": "mdi:layers-edit"
+    },
+    "get": {
+      "service": "mdi:layers-search"
+    }
+  }
+}

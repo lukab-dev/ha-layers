@@ -1,0 +1,15 @@
+{
+  "domain": "layers",
+  "name": "Layers",
+  "after_dependencies": ["light"],
+  "codeowners": ["@lukab-dev"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/lukab-dev/ha-layers",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/lukab-dev/ha-layers/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Never publish anything from a real installation. Diagnostics downloads,
+# config-entry dumps, state snapshots and backtest caches all carry entity ids,
+# names and context ids from someone's home.
+*.diagnostics.json
+config_entry-layers-*.json
+snapshots/
+*backtest_cache*.json
+
+# Local assistant/editor settings stay local.
+.claude/
+CLAUDE.local.md
+.vscode/
+.idea/
+.DS_Store
+
+# uv
+.venv-ha/
+uv.lock

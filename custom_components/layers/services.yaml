@@ -1,0 +1,123 @@
+set:
+  target:
+    entity:
+      domain: light
+  fields:
+    layer:
+      required: true
+      example: tv
+      selector:
+        text:
+    priority:
+      example: 40
+      selector:
+        number:
+          min: 1
+          max: 99
+          mode: box
+    mode:
+      default: set
+      selector:
+        select:
+          options:
+            - set
+            - adjust
+    state:
+      example: "on"
+      selector:
+        select:
+          options:
+            - "on"
+            - "off"
+    brightness:
+      selector:
+        number:
+          min: 1
+          max: 255
+          mode: slider
+    brightness_pct:
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+          mode: slider
+    color_temp_kelvin:
+      selector:
+        color_temp:
+          unit: kelvin
+          min: 1500
+          max: 7000
+    xy_color:
+      example: "[0.68, 0.31]"
+      selector:
+        object:
+    hs_color:
+      example: "[15, 100]"
+      selector:
+        object:
+    rgb_color:
+      selector:
+        color_rgb:
+    transition:
+      selector:
+        number:
+          min: 0
+          max: 300
+          step: 0.5
+          unit_of_measurement: seconds
+          mode: box
+    ttl:
+      selector:
+        duration:
+    until:
+      selector:
+        datetime:
+    resume_after_manual:
+      default: false
+      selector:
+        boolean:
+    on_expire:
+      default: safe
+      selector:
+        select:
+          options:
+            - safe
+            - render
+    only_if_present:
+      default: false
+      selector:
+        boolean:
+    owner:
+      example: tv_dim
+      selector:
+        text:
+
+clear:
+  target:
+    entity:
+      domain: light
+  fields:
+    layer:
+      required: true
+      example: tv
+      selector:
+        text:
+    transition:
+      selector:
+        number:
+          min: 0
+          max: 300
+          step: 0.5
+          unit_of_measurement: seconds
+          mode: box
+
+sync:
+  target:
+    entity:
+      domain: light
+
+get:
+  target:
+    entity:
+      domain: light

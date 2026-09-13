@@ -1,0 +1,191 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Layers",
+        "description": "Choose the lamps Layers manages and what a manual change means by default. Layers never commands a lamp until an automation puts a layer on it, and it starts with commanding switched off (observe only).",
+        "data": {
+          "entities": "Lamps",
+          "default_policy": "When someone changes a lamp by hand"
+        },
+        "data_description": {
+          "entities": "Individual lamps only. Light groups and vendor room groups are rejected: Layers expands them itself.",
+          "default_policy": "Take it back: the change becomes the lamp's base and the layers above it are dropped on that lamp. Edit active layer: the change goes into the layer on top. Keep layers: the change becomes the base, the layers stay."
+        }
+      }
+    },
+    "error": {
+      "not_a_lamp": "These are groups or have no state and cannot be managed: {entities}"
+    },
+    "abort": {
+      "single_instance_allowed": "Layers is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Layers",
+        "data": {
+          "entities": "Lamps",
+          "default_policy": "When someone changes a lamp by hand",
+          "edit_active_entities": "Lamps where a manual change edits the active layer",
+          "base_keep_layers_entities": "Lamps where a manual change keeps the layers"
+        }
+      }
+    },
+    "error": {
+      "not_a_lamp": "These are groups or have no state and cannot be managed: {entities}",
+      "holds_layers": "Clear the layers on these lamps before removing them: {entities}",
+      "not_enrolled": "These lamps are not in the managed list: {entities}",
+      "both_policies": "A lamp can only have one policy: {entities}"
+    }
+  },
+  "selector": {
+    "policy": {
+      "options": {
+        "take_back": "Take it back (drop the layers on that lamp)",
+        "edit_active": "Edit the active layer",
+        "base_keep_layers": "Keep the layers (change the base only)"
+      }
+    }
+  },
+  "entity": {
+    "switch": {
+      "apply": {
+        "name": "Apply"
+      }
+    },
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "pending": "Pending",
+          "failed": "Failed",
+          "shadow": "Observe only"
+        }
+      }
+    }
+  },
+  "issues": {
+    "render_failed": {
+      "title": "Layers could not set {entity_id}",
+      "description": "Layers sent {entity_id} its command {attempts} times and the lamp never reported it. It will try again the next time that lamp's layers change, or on `layers.sync`."
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Layers is not loaded."
+    },
+    "priority_required": {
+      "message": "Layer {layer} does not exist yet on {entity_id}: give it a priority."
+    },
+    "priority_conflict": {
+      "message": "Priority {priority} is already held by layer {other} on {entity_id}. Each layer on a lamp needs its own priority."
+    },
+    "invalid_request": {
+      "message": "Invalid layers request: {reason}"
+    },
+    "no_targets": {
+      "message": "None of the targets is a lamp Layers manages."
+    }
+  },
+  "services": {
+    "set": {
+      "name": "Set layer",
+      "description": "Put a layer on lamps, update it, or change a lamp's base or active layer.",
+      "fields": {
+        "layer": {
+          "name": "Layer",
+          "description": "A layer id (lowercase letters, digits, underscores), or `base`, or `active` for whichever layer is on top."
+        },
+        "priority": {
+          "name": "Priority",
+          "description": "1-99. Higher sits on top. Needed when the layer does not exist yet."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "set decides on/off and its attributes; adjust only changes attributes of a lamp that is already on."
+        },
+        "state": {
+          "name": "State",
+          "description": "on or off. Not used with adjust."
+        },
+        "brightness": {
+          "name": "Brightness",
+          "description": "1-255."
+        },
+        "brightness_pct": {
+          "name": "Brightness %",
+          "description": "1-100."
+        },
+        "color_temp_kelvin": {
+          "name": "Colour temperature",
+          "description": "In kelvin."
+        },
+        "xy_color": {
+          "name": "XY colour",
+          "description": "[x, y]. The most faithful colour for lamps that desaturate hs or rgb."
+        },
+        "hs_color": {
+          "name": "HS colour",
+          "description": "[hue, saturation]."
+        },
+        "rgb_color": {
+          "name": "RGB colour",
+          "description": "[r, g, b]."
+        },
+        "transition": {
+          "name": "Transition",
+          "description": "Seconds, if the lamp supports it."
+        },
+        "ttl": {
+          "name": "Time to live",
+          "description": "The layer expires after this long unless it is set again (a lease)."
+        },
+        "until": {
+          "name": "Until",
+          "description": "The layer expires at this time."
+        },
+        "resume_after_manual": {
+          "name": "Resume after manual change",
+          "description": "If a person takes the lamp back, allow this layer again once the lamp has been off."
+        },
+        "on_expire": {
+          "name": "On expiry",
+          "description": "safe: an expiry may only turn the lamp off or dim it. render: it restores whatever is below, even if that turns the lamp on."
+        },
+        "only_if_present": {
+          "name": "Only if present",
+          "description": "Refresh the layer where it already is; never create it."
+        },
+        "owner": {
+          "name": "Owner",
+          "description": "Who set this layer, for the log and diagnostics."
+        }
+      }
+    },
+    "clear": {
+      "name": "Clear layer",
+      "description": "Remove a layer. The lamps fall back to whatever is below it now.",
+      "fields": {
+        "layer": {
+          "name": "Layer",
+          "description": "A layer id, `active` for the top layer, or `all` (`active` and `all` need a target). The base cannot be cleared."
+        },
+        "transition": {
+          "name": "Transition",
+          "description": "Seconds, if the lamp supports it."
+        }
+      }
+    },
+    "sync": {
+      "name": "Sync",
+      "description": "Send lamps what their layers say they should show. The only way to repair lamps left out of step on purpose (observe-only mode, kept manual changes)."
+    },
+    "get": {
+      "name": "Get layers",
+      "description": "Return each lamp's base, layers, effective command and status."
+    }
+  }
+}

@@ -1,0 +1,4 @@
+# Pinned to the Home Assistant release this is tested against.
+# pytest-homeassistant-custom-component 0.13.364 == homeassistant 2026.9.1 (Python >= 3.14).
+# Bump both together when moving to a newer Home Assistant.
+pytest-homeassistant-custom-component==0.13.364
