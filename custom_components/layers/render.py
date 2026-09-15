@@ -138,6 +138,13 @@ class Renderer:
             for backoff in (0, *RETRY_BACKOFF_S):
                 if backoff:
                     await asyncio.sleep(backoff)
+                if attempts and self.hass.states.get(eid) is None:
+                    # The entity was removed (its integration reloading): away, like
+                    # unavailable below. Still owed; its return decides. Without a
+                    # state its caps are empty and render_wanted would misread the
+                    # dropped brightness as a changed command.
+                    _LOGGER.debug("%s: entity gone during render; owed", eid)
+                    return
                 if attempts and not self.engine.render_wanted(job):
                     # The lamp's command changed without a new render (an expiry that
                     # may not light it, a return recorded as base): stop here.

@@ -1236,3 +1236,23 @@ def test_external_records_the_groups_it_took():
     assert rec.last_external.groups == STATE_BRIGHTNESS
     apply_external(rec, Command("on", 90), None, "device", "take_back", NOW)
     assert rec.last_external.groups is None
+
+
+# --------------------------------------------------------------------------- #
+# Renewals and the lease
+# --------------------------------------------------------------------------- #
+
+
+def test_a_renewal_without_an_expiry_keeps_the_lease():
+    # An identical set "only extends the time" (README): one that gives no ttl must not
+    # silently make a leased layer permanent.
+    nl = layer("nl", 50, Command("on", 13), expires_at=NOW + 600)
+    rec = record(OFF_COMMAND, nl)
+    assert apply_set(rec, SetRequest("nl", Command("on", 13), priority=50), NOW + 1, no_seq).result == "refreshed"
+    assert nl.expires_at == NOW + 600
+    assert apply_set(rec, SetRequest("nl", Command("on", 13), priority=50, expires_at=NOW + 900),
+                     NOW + 2, no_seq).result == "refreshed"
+    assert nl.expires_at == NOW + 900
+    # An update (a different command) replaces the layer, expiry included.
+    assert apply_set(rec, SetRequest("nl", Command("on", 30), priority=50), NOW + 3, no_seq).result == "updated"
+    assert nl.expires_at is None

@@ -228,7 +228,7 @@ def test_our_released_context_never_counts_as_someone_elses():
 def test_external_via_a_known_call_is_not_a_replay_when_newer_than_the_layers():
     call = call_info("ctx-rocker", command=Command("on", 102, WARM), first_seen=NOW - 1)
     rec = record(OFF_COMMAND, layer("tv", 40, OFF_COMMAND), last_layers_change=NOW - 100)
-    ev = event(OFF, obs("on", 102, kelvin=2700), ctx="ctx-rocker")
+    ev = event(obs("on", 60, kelvin=2700), obs("on", 102, kelvin=2700), ctx="ctx-rocker")
     verdict = classify_state(rec, ev, Runtime(calls={"ctx-rocker": call}), HUE, NOW)
     assert verdict == Verdict(EXTERNAL, "automation", call, frozenset({"state", "brightness", "color"}))
     assert verdict.replay is False
@@ -294,9 +294,30 @@ def test_known_call_with_an_unknown_intent_takes_every_group():
 
 def test_known_turn_on_or_off_always_takes_the_state():
     call = call_info("ctx-b", command=Command("on", 50), groups=frozenset({"brightness"}))
-    verdict = classify_state(record(OFF_COMMAND), event(OFF, obs("on", 50), ctx="ctx-b"),
+    verdict = classify_state(record(Command("on", 200)), event(ON_200, obs("on", 50), ctx="ctx-b"),
                              Runtime(calls={"ctx-b": call}), HUE, NOW)
     assert verdict.groups == frozenset({"state", "brightness"})
+
+
+def test_a_known_call_that_flips_the_lamp_takes_every_group_it_shows():
+    # Apple Home "on" and Assist "turn on X" are bare turn_on calls: they name the
+    # state only. But the lamp coming on decided its brightness and colour too. Taking
+    # {state} alone would leave a base that is on with nothing else, which a later
+    # clear cannot restore (the lamp stayed at the adjust layer's 25 %).
+    bare = call_info("ctx-siri", command=Command("on"), groups=frozenset({"state"}))
+    rt = Runtime(calls={"ctx-siri": bare})
+    verdict = classify_state(record(OFF_COMMAND), event(OFF, obs("on", 200, kelvin=2700), ctx="ctx-siri"),
+                             rt, HUE, NOW)
+    assert verdict == Verdict(EXTERNAL, "automation", bare, None)
+    # The same bare turn_on on a lamp that is already on changes nothing but the state.
+    verdict = classify_state(record(Command("on", 200)), event(ON_200, obs("on", 200), ctx="ctx-siri"),
+                             rt, HUE, NOW)
+    assert verdict.groups == frozenset({"state"})
+    # A flip off through a room call likewise takes everything (an off has nothing else).
+    room = call_info("ctx-room", service="turn_off", lamps=frozenset({LAMP}), via_room=frozenset({LAMP}))
+    verdict = classify_state(record(Command("on", 200)), event(ON_200, OFF),
+                             Runtime(room_call=room), HUE, NOW)
+    assert (verdict.kind, verdict.groups) == (EXTERNAL, None)
 
 
 def test_external_via_user_id_not_in_the_call_map():
@@ -331,7 +352,7 @@ def test_room_call_attributes_a_member_change_even_during_our_render():
     rec.last_command = LastCommand(NOW - 2, ours=True, source="ours", target=Command("on", 64))
     rt = Runtime(render_alive=True, room_call=room)
     verdict = classify_state(rec, event(obs("on", 64), OFF), rt, HUE, NOW)
-    assert verdict == Verdict(EXTERNAL, "user", room, frozenset({"state"}))
+    assert verdict == Verdict(EXTERNAL, "user", room, None)
 
 
 def test_room_call_that_does_not_reach_the_lamp_is_ignored():
@@ -969,3 +990,43 @@ def test_changed_groups():
     assert changed_groups(OFF, warm) is None
     assert changed_groups(None, warm) is None
     assert changed_groups(AWAY, warm) is None
+
+
+# --------------------------------------------------------------------------- #
+# 6.1 A person acting while our render runs
+# --------------------------------------------------------------------------- #
+
+
+def _rendering(target: Command, *, at: float = NOW - 3) -> tuple[Record, Runtime]:
+    rec = record(Command("on", 200), layer("tv", 40, target, "set" if target.state else "adjust"))
+    rec.last_command = LastCommand(at, ours=True, source="ours", target=target, context_id="ctx-r")
+    return rec, Runtime(render_alive=True, ours={"ctx-r": OurCommand("ctx-r", target, at)})
+
+
+def test_a_dimmer_moving_away_from_our_target_during_our_render_is_a_person():
+    # Our dim to 64 is in flight; a report with no context (a Hue dimmer) has the lamp
+    # jump to 180. Verification would re-send 64 over them six times: it is the
+    # person's change, and the engine cancels the render.
+    rec, rt = _rendering(Command("on", 64))
+    ev = event(obs("on", 70, kelvin=2700), obs("on", 180, kelvin=2700))
+    assert classify_state(rec, ev, rt, HUE, NOW) == Verdict(EXTERNAL, "device")
+
+
+def test_a_step_towards_our_target_during_our_render_is_still_noise():
+    rec, rt = _rendering(Command("on", 64))
+    ev = event(obs("on", 200, kelvin=2700), obs("on", 120, kelvin=2700))     # a transition step
+    assert classify_state(rec, ev, rt, HUE, NOW) == Verdict(NOISE)
+
+
+def test_a_flip_during_our_render_is_still_noise():
+    # A bridge's optimistic off corrected later, or a person: not told apart here.
+    rec, rt = _rendering(OFF_COMMAND)
+    assert classify_state(rec, event(OFF, obs("on", 200)), rt, HUE, NOW) == Verdict(NOISE)
+
+
+def test_a_move_away_that_carries_our_context_is_the_lamp_answering_our_call():
+    # Inside HA's 5 s context reuse a lamp that clamps our 64 to 200 reports with our
+    # context: verification judges it (and fails loudly), it is not a take-back.
+    rec, rt = _rendering(Command("on", 64))
+    ev = event(obs("on", 100, kelvin=2700), obs("on", 200, kelvin=2700), ctx="ctx-r")
+    assert classify_state(rec, ev, rt, HUE, NOW) == Verdict(NOISE)

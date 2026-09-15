@@ -211,10 +211,13 @@ id `all`; an unknown mode).
     refreshes either kind of layer.
   - present and `req.command == layer.requested` and the request's mode is the
     mode the owner asked for (`requested_mode`, else `mode`) and priority
-    unchanged or omitted → refresh only: update `expires_at`, and `owner` when
-    the request gives one. Nothing else: options a renewal leaves out keep their
-    values. Result `refreshed`. **No render, no re-stacking, edits to `command`
-    survive** (including an adjust layer turned set/off).
+    unchanged or omitted → refresh only: update `expires_at` when the request
+    gives one (a renewal without `ttl`/`until` keeps the lease the layer has: an
+    identical set only extends the time, it never silently makes a leased layer
+    permanent), and `owner` when the request gives one. Nothing else: options a
+    renewal leaves out keep their values. Result `refreshed`. **No render, no
+    re-stacking, edits to `command` survive** (including an adjust layer turned
+    set/off).
   - present and different → `requested = command = req.command`, `mode` = the
     request's mode, `requested_mode = None`, update priority (conflict check),
     expiry, `owner` when given, `resume_after_manual` and `on_expire`; keep
@@ -393,7 +396,12 @@ command=None)`, kinds in the order they are tested:
    `source = call.source`, `call`, `groups`: the call's groups plus `state` for
    a `turn_on`/`turn_off` (which always decides the state); `None` (every group
    the lamp shows) for a toggle, an intent it cannot know (`call.command is
-   None`: brightness steps, profiles), or a call that does not name this lamp.
+   None`: brightness steps, profiles), a call that does not name this lamp, or
+   a report that flips the lamp on/off: a bare `turn_on` (Apple Home, Assist)
+   names only the state, but the lamp coming on decided its brightness and
+   colour too, as the device path treats a flip (6.2). Taking `{state}` alone
+   would leave a base that is on with nothing else, which a later clear could
+   not restore.
    `replay = True` if `call.first_seen < rec.last_layers_change` (a retry loop
    re-applying a press made before the lamp's layers last changed); the engine
    then uses `apply_replay`.
@@ -404,9 +412,18 @@ command=None)`, kinds in the order they are tested:
       contradict the call's intent → `EXTERNAL` from that call, with its source
       and groups as in step 6. (The engine drops a lamp's room call when a
       render of ours starts on it: our newer command's reports are ours.)
-   2. `rt.returning`, or `rt.render_alive` with `rec.last_command` ours (or
-      none) → `NOISE`: `decide_return`, or our render's verification, judges
-      the lamp (and retries).
+   2. `rt.returning` → `NOISE`: `decide_return` judges the lamp.
+      `rt.render_alive` with `rec.last_command` ours (or none): `NOISE`, our
+      render's verification judges the lamp (and retries) — except a report
+      without our context that keeps our target's on/off but moves its
+      brightness or colour further from the target than the report before
+      (`_further`, beyond tolerance): that is a person at a dimmer while we
+      render, → `EXTERNAL(source=device)`, and the engine cancels the render
+      instead of re-sending over them six times. A flip stays noise (a bridge's
+      optimistic off corrected later); a step towards the target is a
+      transition; a report carrying our context inside Home Assistant's 5 s
+      reuse is the lamp answering our call (one that clamps what it was sent)
+      and is left to the verification.
    3. **Late window** — `rec.last_command` within `LATE_WINDOW_S[platform]`
       (default `LATE_WINDOW_DEFAULT_S`, both inclusive), the new state flips
       on/off against `last_command.target`, back to `last_command.from_state`
@@ -576,7 +593,10 @@ still delivered, and why an adjust layer never lights a lamp on its return.
   - `yes` → verified: clear `owed`, delete the repair issue; for platforms with
     a late window, schedule one re-check at `LATE_RECHECK_S`.
   - `colour_off` → accepted after one retry; `diverged = colour`.
-  - lamp unavailable → keep `owed`; the return handles it.
+  - lamp unavailable, or its state gone (the entity removed: its integration
+    reloading), before verification or before a retry → keep `owed`; the
+    return handles it. (Without a state the lamp's caps read as empty, and the
+    projection would drop the brightness: that is not a changed command.)
   - otherwise retry with `RETRY_BACKOFF_S`; after the last, create a
     non-persistent repair issue and fire `layers_render_failed`. Unloading the
     entry deletes these issues.
@@ -607,7 +627,9 @@ Only:
 Never because of an external change, never at startup otherwise, never while
 the apply switch is off, never to a lamp whose effective command is `None`.
 (c)-(f) never push a lamp that is `unsynced` or `manual_keep`, nor one that is
-`untrusted`. Wherever the record changes without a render (the effective command
+`untrusted`; a render skipped for one of those reasons, or because the apply
+switch is off, clears `owed` (only `layers.sync` pushes such a lamp, so
+nothing is owed, and the status sensor must not read `pending` until then). Wherever the record changes without a render (the effective command
 becomes `None`, an expiry the safety rule does not let render, a return recorded
 as base, a replay), a render in flight that sends anything else is cancelled,
 and the renderer re-checks its call before each retry (7.2).

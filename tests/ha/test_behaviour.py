@@ -52,10 +52,13 @@ from custom_components.layers.engine import Engine
 from custom_components.layers.logic.model import (
     DIV_DELIVERY,
     DIV_MANUAL_KEEP,
+    DIV_UNSYNCED,
     OFF_COMMAND,
     Color,
     Command,
 )
+
+from custom_components.layers import render as render_module
 
 from .conftest import FakeLamp, settle, setup_layers
 
@@ -1122,3 +1125,94 @@ async def test_layers_external_describes_who_took_the_lamp_and_what_was_dropped(
          LOGBOOK_ENTRY_MESSAGE: "changed by user: dropped nothing, edited hold",
          LOGBOOK_ENTRY_ENTITY_ID: B},
     ]
+
+
+# --------------------------------------------------------------------------- review 2026-09-15
+
+
+async def test_a_bare_turn_on_learns_the_lamps_brightness_so_a_later_clear_restores_it(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], renders: list[Event],
+) -> None:
+    """Apple Home "on" / Assist "turn on X" send a bare turn_on. The base must learn what
+    the lamp came on at, or a later adjust + clear leaves the lamp at 25 %."""
+    engine = await start(hass, [C])                     # C starts off
+    await light(hass, "turn_on", C, automation())       # bare: comes on at its last 128
+    await settle(hass)
+    assert engine.records[C].base == Command("on", 128, Color.kelvin(2700))
+
+    await layers(hass, "set", entity_id=C, layer="tv", priority=40, mode="adjust", brightness=32)
+    await settle(hass)
+    assert brightness(hass, C) == 32
+    await layers(hass, "clear", layer="tv")
+    await settle(hass)
+    assert brightness(hass, C) == 128
+    assert sent_by_layers(lights["c"], renders)[-1] == ("turn_on", {"brightness": 128,
+                                                                     "color_temp_kelvin": 2700})
+
+
+async def test_a_dimmer_during_our_render_cancels_it_instead_of_being_fought(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], renders: list[Event],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A person at a Hue dimmer while our render is still verifying: their change is
+    taken, the render is cancelled, and nothing is re-sent over them."""
+    monkeypatch.setattr(render_module, "SETTLE_S", 0.3)
+    engine = await start(hass, [A])
+    lamp = lights["a"]
+    await layers(hass, "set", entity_id=A, layer="tv", priority=40, mode="adjust", brightness=64)
+    await hass.async_block_till_done()
+    await asyncio.sleep(0.05)                           # sent, now inside the settle wait
+    assert engine.renderer.alive(A)
+    lamp.push(brightness=200, context=Context())        # no user, no parent: a dimmer
+    await settle(hass, 0.6)
+    rec = engine.records[A]
+    assert kinds(engine, A)[-1] == "external"
+    assert rec.layers == {} and set(rec.tombstones) == {"tv"}
+    assert rec.base == Command("on", 200, Color.kelvin(2700))
+    assert brightness(hass, A) == 200
+    assert len(sent_by_layers(lamp, renders)) == 1     # no retry over the person
+
+
+async def test_a_missed_command_in_shadow_mode_is_not_owed_forever(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], freezer: TickingDateTimeFactory,
+) -> None:
+    """Apply off: a foreign off aimed at an away lamp is recorded and owed; on its
+    return the deferred render is skipped, and the debt must go with it (7.5), or the
+    status sensor reads pending until a sync."""
+    engine = await start(hass, [A], apply=False)
+    lamp = lights["a"]
+    lamp.set_available(False)
+    await hass.async_block_till_done()
+    await light(hass, "turn_off", A, automation())
+    await settle(hass)
+    rec = engine.records[A]
+    assert rec.owed is not None and rec.owed.missed
+    lamp.set_available(True)
+    await hass.async_block_till_done()
+    await advance(hass, freezer, 5.5)
+    assert rec.owed is None
+    assert rec.diverged == DIV_UNSYNCED
+    assert state(hass, STATUS).attributes["pending_since"] == {}
+    assert lamp.calls == []
+
+
+async def test_an_entity_removed_mid_render_keeps_the_command_owed(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lamp's integration reloads between a failed verification and the retry: the
+    state is gone. Its caps read as empty then; the render must not misread its own
+    brightness dropping out of the projection as a changed command and drop the debt."""
+    monkeypatch.setattr(render_module, "RETRY_BACKOFF_S", (0.4, 0.4, 0.4, 0.4, 0.4, 0.4))
+    engine = await start(hass, [A])
+    lamp = lights["a"]
+    lamp.ignore_commands = True
+    await layers(hass, "set", entity_id=A, layer="tv", priority=40, brightness=64)
+    await asyncio.sleep(0.15)                           # first attempt verified: not taken
+    assert engine.renderer.alive(A)
+    hass.states.async_remove(A)                         # gone, inside the backoff
+    await hass.async_block_till_done()
+    await settle(hass, 0.6)
+    rec = engine.records[A]
+    assert not engine.renderer.alive(A)
+    assert rec.owed is not None and rec.owed.target == Command("on", 64, WARM)
+    assert rec.available is False

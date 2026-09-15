@@ -252,9 +252,15 @@ def _drop_all(rec: Record, source: str, now: float) -> tuple[str, ...]:
     return tuple(layer.id for layer in dropped)
 
 
-def _renew(layer: Layer, req: SetRequest) -> None:
-    """What a refresh changes: the lease, and the owner when one is given."""
-    layer.expires_at = req.expires_at
+def _renew(layer: Layer, req: SetRequest, *, keep_lease: bool = False) -> None:
+    """What a refresh changes: the lease, and the owner when one is given.
+
+    ``keep_lease``: a request without an expiry leaves the one the layer has. An
+    identical set only extends the time; it never silently makes a leased layer
+    permanent. An update (a different command) replaces the layer, expiry included.
+    """
+    if not (keep_lease and req.expires_at is None):
+        layer.expires_at = req.expires_at
     if req.owner is not None:
         layer.owner = req.owner
 
@@ -419,7 +425,7 @@ def _set_named_layer(
     command = _as_mode(req.command, mode) if req.only_if_present else req.command
     new_priority = req.priority is not None and req.priority != layer.priority
     if command == layer.requested and mode == asked and not new_priority:
-        _renew(layer, req)
+        _renew(layer, req, keep_lease=True)
         return SetResult(SET_REFRESHED, layer_id)
 
     if new_priority:

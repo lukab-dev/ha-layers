@@ -879,9 +879,11 @@ class Engine:
         rec = self.records[eid]
         if deferred and rec.untrusted:
             self.renderer.cancel(eid)
+            rec.owed = None             # only layers.sync pushes it: nothing is owed
             return RESULT_UNCHANGED
         if deferred and rec.diverged in DIV_SYNC_ONLY:
-            return RESULT_UNCHANGED     # only layers.sync pushes these (SPEC 2)
+            rec.owed = None             # only layers.sync pushes these (SPEC 2)
+            return RESULT_UNCHANGED
         now = self.now()
         res = resolve(rec, now)
         effective = res.command
@@ -911,6 +913,7 @@ class Engine:
         if not self.apply:
             self.renderer.cancel(eid)
             rec.diverged = DIV_UNSYNCED
+            rec.owed = None             # SPEC 7.5: with Apply off a lamp owes nothing
             self.notify()
             return RESULT_SHADOW
         if not deferred and rec.diverged in DIV_SYNC_ONLY:

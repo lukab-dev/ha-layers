@@ -232,8 +232,13 @@ def _with_state(call: CallInfo) -> frozenset[str]:
     return frozenset(call.groups)
 
 
-def _external_from_call(rec: Record, call: CallInfo) -> Verdict:
-    return Verdict(EXTERNAL, source=call.source, call=call, groups=_call_groups(rec, call),
+def _external_from_call(rec: Record, call: CallInfo, flipped: bool = False) -> Verdict:
+    """``flipped``: the lamp went off -> on or on -> off. A bare ``turn_on`` names only the
+    state, but the lamp coming on decided its brightness and colour too (as the device
+    path already treats a flip): taking ``{state}`` alone would leave a base that is on
+    with nothing else, and never learns what the lamp shows."""
+    groups = None if flipped else _call_groups(rec, call)
+    return Verdict(EXTERNAL, source=call.source, call=call, groups=groups,
                    replay=_replay(rec, call))
 
 
@@ -278,6 +283,15 @@ def _consistent(old: Observed, new: Observed, target: Command, caps: Caps) -> bo
     if _on_off(new) is None or new.state != target.state:
         return False
     return not _further(old, new, call)
+
+
+def _moved_away(old: Observed, new: Observed, target: Command | None, caps: Caps) -> bool:
+    """``new`` kept ``target``'s on/off but got further from it than ``old`` was (no flip)."""
+    if target is None or target.state not in (ON, OFF) or _flipped(old, new):
+        return False
+    if _on_off(new) != target.state:
+        return False
+    return _further(old, new, project(target, caps))
 
 
 def _stale_ours(rec: Record, context_id: str) -> bool:
@@ -367,17 +381,25 @@ def classify_state(rec: Record, ev: StateEvent, rt: Runtime, caps: Caps, now: fl
             context_id = parent_id = user_id = None
 
     if context_id is not None and context_id in rt.calls:
-        return _external_from_call(rec, rt.calls[context_id])
+        return _external_from_call(rec, rt.calls[context_id], _flipped(old, new))
     if user_id or parent_id:
         return Verdict(EXTERNAL, source=SRC_USER if user_id else SRC_AUTOMATION)
 
     room = rt.room_call
     if room is not None and _reaches(room, rec.entity_id) and not _contradicts(room, new):
-        return _external_from_call(rec, room)
+        return _external_from_call(rec, room, _flipped(old, new))
     if rt.returning:
         return Verdict(NOISE)       # decide_return judges the lamp once it has settled
     last = rec.last_command
     if rt.render_alive and (last is None or last.ours):
+        if not reused and last is not None and _moved_away(old, new, last.target, caps):
+            # A person at a dimmer while our render runs: the lamp kept our on/off but
+            # its brightness or colour moved away from our target. Verification would
+            # re-send over them, up to six times. A flip stays noise (a bridge's
+            # optimistic off corrected later); a step towards the target is a transition;
+            # a report still carrying our context is the lamp answering our call (one
+            # that clamps what it was sent) and is left to the verification.
+            return Verdict(EXTERNAL, source=SRC_DEVICE)
         return Verdict(NOISE)       # our render's verification judges it (and retries)
     if (
         not reused

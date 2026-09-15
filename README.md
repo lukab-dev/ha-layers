@@ -65,6 +65,12 @@ A layer set with `resume_after_manual` is let back onto a lamp once that lamp ha
 seen off. That suits a nightlight: if the house-wide off catches it mid-walk, the next
 motion can relight it.
 
+A change that turns a lamp on takes everything the lamp then shows, even when the
+call named only the state (Apple Home's "on", Assist's "turn on X"): the base learns
+the brightness and colour the lamp came on at, so a later `clear` can restore them.
+A person changing a lamp while Layers is still delivering a command to it is not
+fought either: the delivery is cancelled and their change is taken.
+
 Some changes are not treated as external:
 
 - a lamp dropping off the network and coming back;
@@ -76,8 +82,9 @@ Some changes are not treated as external:
 ### Leases and expiry
 
 A layer can have a `ttl` or an `until`. Owners can renew a `ttl` by setting the same
-layer again: an identical request only extends the time. That makes the `ttl` a lease
-that lapses if its owner stops renewing it.
+layer again: an identical request only extends the time (one without a `ttl` leaves
+the lease as it is). That makes the `ttl` a lease that lapses if its owner stops
+renewing it.
 
 **When a layer expires, it may only turn a lamp off or dim it.** If expiring would turn
 a lamp on or brighten it, the layer is dropped and the lamp stays as it is. Not knowing
