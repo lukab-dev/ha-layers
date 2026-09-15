@@ -17,6 +17,10 @@ below that layer **now**, not a snapshot taken earlier.
 - **Opt-in and small.** It only touches the lamps you enrol, and only through its own
   services. It does not intercept Home Assistant's light services, and it uses only
   documented APIs.
+- **Switches too.** A `switch.*` entity (a relay behind a light, a smart plug) can be
+  enrolled like a lamp. It is a lamp that only does on/off: brightness and colour in a
+  layer are projected away for it, and a layer holding it off is verified, survives a
+  restart, and is delivered again when the device comes back on by itself.
 
 ## Why
 

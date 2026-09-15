@@ -555,3 +555,43 @@ def test_on_without_brightness_keeps_the_lamp_where_it_is():
 def test_unknown_brightness_on_a_lit_lamp_cannot_rule_out_raising():
     assert raises_output(on(None), Command("on", 200))
     assert raises_output(Command("on"), Command("on", 1))
+
+
+# --------------------------------------------------------------------------- #
+# A switch: no colour modes at all (SPEC 4, added 2026-09-15)
+# --------------------------------------------------------------------------- #
+
+SWITCH_ATTRS = {"friendly_name": "Relay", "device_class": "outlet"}
+
+
+def test_a_switch_has_no_modes_and_no_transition() -> None:
+    caps = caps_from_attrs(SWITCH_ATTRS, "matter")
+    assert caps.modes == frozenset() and not caps.transition
+    assert caps.min_kelvin is None and caps.max_kelvin is None
+
+
+def test_a_switch_takes_a_bare_on_or_off_whatever_the_command_says() -> None:
+    caps = caps_from_attrs(SWITCH_ATTRS, "matter")
+    on = project(Command("on", 200, Color.xy(0.68, 0.31)), caps)
+    assert on is not None and on.service == "turn_on" and dict(on.data) == {}
+    off = project(OFF_COMMAND, caps)
+    assert off is not None and off.service == "turn_off"
+
+
+def test_a_switch_is_verified_on_state_alone() -> None:
+    caps = caps_from_attrs(SWITCH_ATTRS, "matter")
+    shown_on = observed_from_state("on", SWITCH_ATTRS, 0.0)
+    shown_off = observed_from_state("off", SWITCH_ATTRS, 0.0)
+    assert matches(shown_on, Call.make("turn_on"), caps) == "yes"
+    assert matches(shown_off, Call.make("turn_on"), caps) == "no"
+    assert matches(shown_off, Call.make("turn_off"), caps) == "yes"
+    assert compared_groups(shown_on, Call.make("turn_on"), caps) == frozenset()
+    assert observed_to_command(shown_on, caps) == Command("on", None, None)
+
+
+def test_turning_a_switch_on_raises_output_and_off_never_does() -> None:
+    off = observed_from_state("off", SWITCH_ATTRS, 0.0)
+    on = observed_from_state("on", SWITCH_ATTRS, 0.0)
+    assert raises_output(off, Command("on", None, None))
+    assert not raises_output(on, Command("on", None, None))
+    assert not raises_output(on, OFF_COMMAND)

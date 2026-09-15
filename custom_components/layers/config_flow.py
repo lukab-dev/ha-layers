@@ -23,14 +23,21 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
 )
 
-from .const import CONF_BASE_KEEP, CONF_DEFAULT_POLICY, CONF_EDIT_ACTIVE, CONF_ENTITIES, DOMAIN
+from .const import (
+    CONF_BASE_KEEP,
+    CONF_DEFAULT_POLICY,
+    CONF_EDIT_ACTIVE,
+    CONF_ENTITIES,
+    DOMAIN,
+    MANAGED_DOMAINS,
+)
 from .logic.model import POLICIES, POLICY_TAKE_BACK
 
 GROUP_ATTRS = ("entity_id", "is_hue_group", "group_entities")
 
 
 def _lamps_selector() -> EntitySelector:
-    return EntitySelector(EntitySelectorConfig(domain="light", multiple=True))
+    return EntitySelector(EntitySelectorConfig(domain=list(MANAGED_DOMAINS), multiple=True))
 
 
 def _policy_selector() -> SelectSelector:

@@ -9,7 +9,7 @@
           "default_policy": "When someone changes a lamp by hand"
         },
         "data_description": {
-          "entities": "Individual lamps only. Light groups and vendor room groups are rejected: Layers expands them itself.",
+          "entities": "Individual lamps and switches only. Light groups, switch groups and vendor room groups are rejected: Layers expands them itself. A switch is held on or off; brightness and colour do not apply to it.",
           "default_policy": "Take it back: the change becomes the lamp's base and the layers above it are dropped on that lamp. Edit active layer: the change goes into the layer on top. Keep layers: the change becomes the base, the layers stay."
         }
       }

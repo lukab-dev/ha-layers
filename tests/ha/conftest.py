@@ -31,6 +31,7 @@ from homeassistant.components.light import (
     LightEntity,
     LightEntityFeature,
 )
+from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util import color as color_util
@@ -172,6 +173,79 @@ class FakeLamp(LightEntity):
         self._attr_available = available
         self.async_set_context(Context())
         self.async_write_ha_state()
+
+
+class FakeSwitch(SwitchEntity):
+    """A relay or a smart plug: on/off only, with the same misbehaviour switches."""
+
+    _attr_should_poll = False
+
+    def __init__(self, object_id: str, *, on: bool = False) -> None:
+        self.entity_id = f"switch.{object_id}"
+        self._attr_unique_id = object_id
+        self._attr_name = object_id.replace("_", " ").title()
+        self._attr_is_on = on
+        self.ignore_commands = False
+        self.revert_after: float | None = None
+        self.calls: list[tuple[str, dict[str, Any], Context | None]] = []
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self.calls.append(("turn_on", dict(kwargs), self._context))
+        if self.ignore_commands:
+            return
+        was_on = self._attr_is_on
+        self._attr_is_on = True
+        self.async_write_ha_state()
+        self._maybe_revert(was_on)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self.calls.append(("turn_off", dict(kwargs), self._context))
+        if self.ignore_commands:
+            return
+        was_on = self._attr_is_on
+        self._attr_is_on = False
+        self.async_write_ha_state()
+        self._maybe_revert(was_on)
+
+    def _maybe_revert(self, was_on: bool) -> None:
+        if self.revert_after is None or was_on == self._attr_is_on:
+            return
+        delay, self.revert_after = self.revert_after, None
+
+        def _revert() -> None:
+            self._attr_is_on = was_on
+            self.push(context=Context())
+
+        self.hass.loop.call_later(delay, _revert)
+
+    def push(self, *, context: Context | None = None, **attrs: Any) -> None:
+        """Write the switch's state as if the device reported it (no context by default)."""
+        for key, value in attrs.items():
+            setattr(self, f"_attr_{key}", value)
+        self.async_set_context(context or Context())
+        self.async_write_ha_state()
+
+    def set_available(self, available: bool) -> None:
+        self._attr_available = available
+        self.async_set_context(Context())
+        self.async_write_ha_state()
+
+
+@pytest.fixture
+def plugs() -> dict[str, FakeSwitch]:
+    return {
+        "relay": FakeSwitch("relay", on=True),
+        "plug": FakeSwitch("plug", on=False),
+    }
+
+
+@pytest.fixture
+async def switches(hass: HomeAssistant, plugs: dict[str, FakeSwitch]) -> dict[str, FakeSwitch]:
+    """The fake switches behind the real switch domain."""
+    setup_test_component_platform(hass, "switch", list(plugs.values()))
+    assert await async_setup_component(hass, "switch", {"switch": [{"platform": "test"}]})
+    await hass.async_block_till_done()
+    return plugs
 
 
 @pytest.fixture

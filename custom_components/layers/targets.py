@@ -1,4 +1,7 @@
-"""Resolve service targets and other integrations' light calls to enrolled lamps.
+"""Resolve service targets and other integrations' light/switch calls to enrolled lamps.
+
+A "lamp" is any entity Layers manages: a ``light.*`` or a ``switch.*``. A switch
+is a lamp with no colour modes, so everything but on/off is projected away.
 
 Home Assistant's own target helper does not expand light groups or vendor room
 groups (it only expands entities that carry a ``group`` attribute and old-style
@@ -21,6 +24,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.target import TargetSelection, async_extract_referenced_entity_ids
 
+from .const import MANAGED_DOMAINS
 from .logic.model import (
     GROUP_BRIGHTNESS,
     GROUP_COLOR,
@@ -66,7 +70,7 @@ def expand(
     stack: list[tuple[str, bool]] = [(e, False) for e in entity_ids]
     while stack:
         entity_id, vendor = stack.pop()
-        if entity_id in seen or not entity_id.startswith("light."):
+        if entity_id in seen or entity_id.split(".", 1)[0] not in MANAGED_DOMAINS:
             continue
         seen.add(entity_id)
         state = hass.states.get(entity_id)
@@ -101,7 +105,7 @@ def service_targets(hass: HomeAssistant, data: Mapping[str, Any]) -> tuple[set[s
 def normalise_call(
     hass: HomeAssistant, data: Mapping[str, Any], service: str, enrolled: set[str]
 ) -> tuple[frozenset[str], frozenset[str], Command | None, frozenset[str]]:
-    """Reduce someone else's light.* call to what Layers needs.
+    """Reduce someone else's light.* or switch.* call to what Layers needs.
 
     Returns ``(lamps, via_vendor_group, intent, groups)``: the enrolled lamps it
     targets, the subset reached through a vendor group, the command it asks for

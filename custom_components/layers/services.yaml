@@ -1,7 +1,9 @@
 set:
   target:
     entity:
-      domain: light
+      domain:
+        - light
+        - switch
   fields:
     layer:
       required: true
@@ -96,7 +98,9 @@ set:
 clear:
   target:
     entity:
-      domain: light
+      domain:
+        - light
+        - switch
   fields:
     layer:
       required: true
@@ -115,9 +119,13 @@ clear:
 sync:
   target:
     entity:
-      domain: light
+      domain:
+        - light
+        - switch
 
 get:
   target:
     entity:
-      domain: light
+      domain:
+        - light
+        - switch

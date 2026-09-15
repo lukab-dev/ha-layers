@@ -6,6 +6,11 @@ from typing import Final
 
 DOMAIN: Final = "layers"
 
+# What can be enrolled. A light is the full model; a switch is a lamp that only does
+# on/off (no colour modes, so brightness and colour are projected away). Groups of
+# either kind are expanded, never enrolled.
+MANAGED_DOMAINS: Final = frozenset({"light", "switch"})
+
 STORAGE_KEY: Final = "layers.state"
 STORAGE_VERSION: Final = 1
 STORAGE_MINOR_VERSION: Final = 1

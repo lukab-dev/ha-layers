@@ -178,7 +178,7 @@ class Renderer:
                 try:
                     async with asyncio.timeout(RENDER_CALL_TIMEOUT_S):
                         await self.hass.services.async_call(
-                            "light", job.call.service, data, blocking=True, context=ctx
+                            eid.split(".", 1)[0], job.call.service, data, blocking=True, context=ctx
                         )
                 except (HomeAssistantError, vol.Invalid, TimeoutError) as err:
                     _LOGGER.debug("%s: %s %s failed (%s); verification decides", eid,

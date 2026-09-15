@@ -123,6 +123,11 @@ kelvin_to_xy(kelvin: float) -> tuple[float, float]
 
 - `caps_from_attrs`: `supported_color_modes` → `modes`; `min_color_temp_kelvin`,
   `max_color_temp_kelvin`; `transition` from `supported_features & 32`.
+  A `switch.*` entity has none of these, so its `Caps` are empty: `project` sends a
+  bare `turn_on` / `turn_off`, `matches` compares its state alone, and `raises_output`
+  is true only for off → on. Enrolment, target expansion, the call listener and the
+  render call take `light.*` and `switch.*` alike (`const.MANAGED_DOMAINS`); a call in one
+  domain is only ever read against enrolled entities of that domain.
 - `observed_from_state`: `brightness`, `color_mode`, `xy_color`, `hs_color`,
   `color_temp_kelvin` from the attributes (ints/tuples; missing → `None`).
 - `observed_to_command` (used when recording what a lamp shows as a command):

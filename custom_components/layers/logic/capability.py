@@ -135,7 +135,9 @@ def caps_from_attrs(attrs: Mapping[str, Any], platform: str) -> Caps:
     ``supported_color_modes`` becomes ``modes``; the kelvin range is read from
     ``min_color_temp_kelvin`` / ``max_color_temp_kelvin``; ``transition`` is
     bit 32 of ``supported_features``. Missing attributes give an empty mode
-    set, no range and no transition.
+    set, no range and no transition - which is exactly what a ``switch.*``
+    entity has, so a switch is a lamp that only does on/off: ``project`` drops
+    brightness and colour for it, and ``matches`` compares its state alone.
     """
     attrs = attrs or {}
     raw = attrs.get(ATTR_SUPPORTED_COLOR_MODES) or ()

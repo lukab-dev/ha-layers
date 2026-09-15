@@ -45,6 +45,7 @@ from .const import (
     DECISION_BUFFER,
     DOMAIN,
     EVENT_EXTERNAL,
+    MANAGED_DOMAINS,
     RESULT_IN_SYNC,
     RESULT_PENDING,
     RESULT_QUEUED,
@@ -117,7 +118,7 @@ DIV_SYNC_ONLY = frozenset({DIV_MANUAL_KEEP, DIV_UNSYNCED})
 
 @callback
 def _light_call_filter(event_data: dict[str, Any]) -> bool:
-    return event_data.get("domain") == "light" and event_data.get("service") in LIGHT_SERVICES
+    return event_data.get("domain") in MANAGED_DOMAINS and event_data.get("service") in LIGHT_SERVICES
 
 
 def _on_off(obs: Observed | None) -> str | None:
@@ -784,8 +785,12 @@ class Engine:
     def _handle_call(self, event: Event, may_control: Callable[[str, str], bool] | None) -> None:
         ctx = event.context
         service = event.data.get("service")
+        domain = event.data.get("domain")
+        # A light call cannot reach a switch and vice versa: Home Assistant refuses
+        # the mismatch, so only lamps of the call's own domain are considered.
         lamps, via, intent, groups = normalise_call(
-            self.hass, event.data.get("service_data") or {}, service, self.enrolled
+            self.hass, event.data.get("service_data") or {}, service,
+            {lamp for lamp in self.enrolled if lamp.split(".", 1)[0] == domain},
         )
         if may_control is not None:
             # A lamp the caller may not control is left out: Home Assistant refuses it.
