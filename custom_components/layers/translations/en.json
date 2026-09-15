@@ -29,7 +29,8 @@
           "entities": "Lamps",
           "default_policy": "When someone changes a lamp by hand",
           "edit_active_entities": "Lamps where a manual change edits the active layer",
-          "base_keep_layers_entities": "Lamps where a manual change keeps the layers"
+          "base_keep_layers_entities": "Lamps where a manual change keeps the layers",
+          "reassert_entities": "Entities where a change with no context is the device misbehaving: the layers are put back (a smart plug that comes back on by itself). App and automation changes still take it back; never for anything with a wall switch."
         }
       }
     },

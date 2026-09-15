@@ -64,6 +64,7 @@ scene, or another automation. What an external change means depends on the lamp'
 | `take_back` (default) | becomes the lamp's base | are dropped on that lamp, and each id is blocked there until its owner clears it |
 | `edit_active` | is written into the layer on top; switching the lamp off (or on, from off) also becomes its base | stay; the edit is lost when that layer is cleared, but a switch-off never is |
 | `base_keep_layers` | becomes the base, but the lamp keeps showing your change | stay; `layers.sync` re-applies them |
+| `reassert` (per entity only) | with no service call behind it, is the device misbehaving: ignored | stay, and are sent again after the debounce. App and automation changes still take it back; a second device change within 30 s does too. For a smart plug that comes back on by itself, never for anything with a wall switch |
 
 A layer set with `resume_after_manual` is let back onto a lamp once that lamp has been
 seen off. That suits a nightlight: if the house-wide off catches it mid-walk, the next

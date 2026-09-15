@@ -196,3 +196,100 @@ async def test_get_describes_a_switch(hass: HomeAssistant, switches: dict[str, F
     ent = response["entities"]["switch.relay"]
     assert ent["observed"]["state"] == "on"
     assert ent["observed"]["brightness"] is None
+
+
+# --------------------------------------------------------------------------- #
+# The reassert policy: a smart plug that comes back on by itself
+# --------------------------------------------------------------------------- #
+
+
+async def test_reassert_puts_the_hold_back_after_a_no_context_flip(
+    hass: HomeAssistant, switches: dict[str, FakeSwitch], freezer: TickingDateTimeFactory,
+) -> None:
+    engine = await start(hass, ["switch.relay"], reassert=["switch.relay"])
+    await hass.services.async_call(
+        DOMAIN, "set", {"entity_id": "switch.relay", "layer": "sleep", "priority": 50, "state": "off"},
+        blocking=True,
+    )
+    await settle(hass)
+    await advance(hass, freezer, 20)         # past the late window
+    plug = switches["relay"]
+    calls_before = len(plug.calls)
+    plug.push(is_on=True)                    # came back on by itself, no context
+    await advance(hass, freezer, 3.5)        # the debounce, then the reassert render
+    await settle(hass)
+    rec = engine.records["switch.relay"]
+    assert "sleep" in rec.layers and rec.tombstones == {}
+    assert rec.base.state == "on"            # what it was before the hold: untouched
+    assert plug.calls[calls_before:][-1][0] == "turn_off"
+    assert hass.states.get("switch.relay").state == "off"
+    assert rec.diverged is None
+
+
+async def test_reassert_still_yields_to_the_app(
+    hass: HomeAssistant, switches: dict[str, FakeSwitch], hass_admin_user: MockUser,
+) -> None:
+    engine = await start(hass, ["switch.relay"], reassert=["switch.relay"])
+    await hass.services.async_call(
+        DOMAIN, "set", {"entity_id": "switch.relay", "layer": "sleep", "priority": 50, "state": "off"},
+        blocking=True,
+    )
+    await settle(hass)
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": "switch.relay"},
+        blocking=True, context=Context(user_id=hass_admin_user.id),
+    )
+    await settle(hass)
+    rec = engine.records["switch.relay"]
+    assert not rec.layers and "sleep" in rec.tombstones
+    assert hass.states.get("switch.relay").state == "on"
+
+
+async def test_reassert_sends_the_hold_again_when_the_plug_returns_on(
+    hass: HomeAssistant, switches: dict[str, FakeSwitch], freezer: TickingDateTimeFactory,
+) -> None:
+    """The dropout case: held off, off the network for a while, back showing on."""
+    engine = await start(hass, ["switch.relay"], reassert=["switch.relay"])
+    await hass.services.async_call(
+        DOMAIN, "set", {"entity_id": "switch.relay", "layer": "sleep", "priority": 50, "state": "off"},
+        blocking=True,
+    )
+    await settle(hass)
+    plug = switches["relay"]
+    plug.set_available(False)
+    await hass.async_block_till_done()
+    await advance(hass, freezer, 120)
+    calls_before = len(plug.calls)
+    plug._attr_is_on = True
+    plug.set_available(True)
+    await hass.async_block_till_done()
+    await advance(hass, freezer, 5.5)        # the return settle
+    await settle(hass)
+    rec = engine.records["switch.relay"]
+    assert "sleep" in rec.layers
+    assert plug.calls[calls_before:][-1][0] == "turn_off"
+    assert hass.states.get("switch.relay").state == "off"
+
+
+async def test_reassert_gives_up_to_someone_at_the_plugs_own_button(
+    hass: HomeAssistant, switches: dict[str, FakeSwitch], freezer: TickingDateTimeFactory,
+) -> None:
+    engine = await start(hass, ["switch.relay"], reassert=["switch.relay"])
+    await hass.services.async_call(
+        DOMAIN, "set", {"entity_id": "switch.relay", "layer": "sleep", "priority": 50, "state": "off"},
+        blocking=True,
+    )
+    await settle(hass)
+    await advance(hass, freezer, 20)
+    plug = switches["relay"]
+    plug.push(is_on=True)
+    await advance(hass, freezer, 3.5)
+    await settle(hass)
+    assert hass.states.get("switch.relay").state == "off"      # reasserted once
+    await advance(hass, freezer, 20)                           # still inside the 30 s cooldown
+    plug.push(is_on=True)                                      # pressed again
+    await advance(hass, freezer, 3.5)
+    await settle(hass)
+    rec = engine.records["switch.relay"]
+    assert hass.states.get("switch.relay").state == "on"
+    assert not rec.layers and "sleep" in rec.tombstones

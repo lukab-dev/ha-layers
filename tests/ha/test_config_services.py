@@ -45,6 +45,7 @@ from custom_components.layers.const import (
     CONF_DEFAULT_POLICY,
     CONF_EDIT_ACTIVE,
     CONF_ENTITIES,
+    CONF_REASSERT,
     DOMAIN,
     STALE_UNAVAILABLE_S,
 )
@@ -167,6 +168,7 @@ async def test_config_flow_creates_an_observe_only_entry(
         CONF_DEFAULT_POLICY: "edit_active",
         CONF_EDIT_ACTIVE: [],
         CONF_BASE_KEEP: [],
+        CONF_REASSERT: [],
     }
     await hass.async_block_till_done()
     entry = result["result"]
@@ -239,6 +241,7 @@ async def test_options_saving_reloads_the_entry(hass: HomeAssistant, lights: dic
         CONF_DEFAULT_POLICY: "base_keep_layers",
         CONF_EDIT_ACTIVE: [B],
         CONF_BASE_KEEP: [],
+        CONF_REASSERT: [],
     }
     assert entry.state is ConfigEntryState.LOADED
     engine = entry.runtime_data.engine

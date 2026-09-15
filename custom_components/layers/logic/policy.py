@@ -32,30 +32,35 @@ from dataclasses import dataclass
 
 from .capability import MATCH_YES, matches, observed_to_command, project, raises_output
 from .model import (
+    Caps,
+    Command,
+    DIV_DELIVERY,
     DIV_MANUAL_KEEP,
     DIV_PARTIAL,
+    External,
     GROUP_BRIGHTNESS,
     GROUP_COLOR,
     GROUP_STATE,
     LAYER_ACTIVE,
     LAYER_ALL,
     LAYER_BASE,
+    Layer,
+    MODES,
     MODE_ADJUST,
     MODE_SET,
-    MODES,
     OFF,
     OFF_COMMAND,
     ON,
     ON_EXPIRE_RENDER,
+    Observed,
     POLICIES,
     POLICY_BASE_KEEP_LAYERS,
     POLICY_EDIT_ACTIVE,
-    Caps,
-    Command,
-    External,
-    Layer,
-    Observed,
+    POLICY_REASSERT,
+    POLICY_TAKE_BACK,
+    REASSERT_COOLDOWN_S,
     Record,
+    SRC_DEVICE,
     SetRequest,
     Tombstone,
     merge_command,
@@ -140,6 +145,7 @@ class ExternalResult:
     dropped: tuple[str, ...] = ()   # layers dropped and tombstoned, bottom of the stack first
     edited: str | None = None       # the layer edit_active changed
     partial: bool = False           # the lamp was marked diverged=partial
+    reassert: bool = False          # reassert: base and layers kept, the engine re-renders
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,6 +539,12 @@ def apply_external(
       stay. If a layer is active and the lamp does not show the effective
       command, it is marked ``manual_keep``; otherwise ``diverged`` follows the
       ``take_back`` rule.
+    - ``reassert``: a ``device`` change (no service call behind it) while a
+      layer is active is the device misbehaving: the base and the layers stay,
+      ``diverged = delivery`` and the result says ``reassert`` so the engine
+      sends the effective command again. A ``user`` or ``automation`` change, a
+      change with no active layer, or a second ``device`` change within
+      ``REASSERT_COOLDOWN_S`` of a reassert is a ``take_back``.
     - ``replay`` (``POLICY_REPLAY``): see ``apply_replay``.
 
     Every policy but ``replay`` clears ``owed``; all record ``last_external``.
@@ -546,9 +558,21 @@ def apply_external(
     dropped: tuple[str, ...] = ()
     edited: str | None = None
     partial = False
+    reassert = False
+
+    if policy == POLICY_REASSERT:
+        last = rec.last_external
+        recent = (last is not None and last.policy == POLICY_REASSERT
+                  and now - last.at < REASSERT_COOLDOWN_S)
+        if source == SRC_DEVICE and active_layer(rec, now) is not None and not recent:
+            reassert = True
+        else:
+            policy = POLICY_TAKE_BACK
 
     top = active_layer(rec, now) if policy == POLICY_EDIT_ACTIVE else None
-    if top is not None:
+    if reassert:
+        rec.diverged = DIV_DELIVERY
+    elif top is not None:
         _edit_from_external(top, shown, groups)
         edited = top.id
         taken = shown.groups() if groups is None else shown.groups() & groups
@@ -579,10 +603,10 @@ def apply_external(
 
     rec.owed = None
     rec.last_external = External(
-        at=now, source=source, policy=policy, user_id=user_id, dropped=dropped, edited=edited,
-        groups=groups,
+        at=now, source=source, policy=POLICY_REASSERT if reassert else policy, user_id=user_id,
+        dropped=dropped, edited=edited, groups=groups,
     )
-    return ExternalResult(dropped, edited, partial)
+    return ExternalResult(dropped, edited, partial, reassert)
 
 
 def _edit_from_external(top: Layer, shown: Command, groups: frozenset[str] | None) -> None:

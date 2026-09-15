@@ -1256,3 +1256,50 @@ def test_a_renewal_without_an_expiry_keeps_the_lease():
     # An update (a different command) replaces the layer, expiry included.
     assert apply_set(rec, SetRequest("nl", Command("on", 30), priority=50), NOW + 3, no_seq).result == "updated"
     assert nl.expires_at is None
+
+
+# --------------------------------------------------------------------------- #
+# apply_external: reassert (per-entity; a device that changes itself)
+# --------------------------------------------------------------------------- #
+
+
+def test_reassert_keeps_base_and_layers_on_a_device_change_and_asks_for_a_render():
+    rec = record(Command("on", 200), layer("sleep", 50, OFF_COMMAND))
+    res = apply_external(rec, Command("on", None), None, "device", "reassert", NOW)
+    assert res == ExternalResult((), None, False, True)
+    assert rec.base == Command("on", 200) and "sleep" in rec.layers and rec.tombstones == {}
+    assert rec.diverged == "delivery" and rec.owed is None
+    assert rec.last_external.policy == "reassert" and rec.last_external.source == "device"
+
+
+@pytest.mark.parametrize("source", ["user", "automation"])
+def test_reassert_takes_back_on_a_change_with_a_call_behind_it(source):
+    rec = record(Command("on", 200), layer("sleep", 50, OFF_COMMAND))
+    res = apply_external(rec, Command("on", None), None, source, "reassert", NOW, "u1")
+    assert res.reassert is False and res.dropped == ("sleep",)
+    assert rec.layers == {} and "sleep" in rec.tombstones
+    assert rec.base is not None and rec.base.state == "on"
+    assert rec.last_external.policy == "take_back"
+
+
+def test_reassert_with_no_active_layer_is_a_take_back():
+    rec = record(Command("off"))
+    res = apply_external(rec, Command("on", None), None, "device", "reassert", NOW)
+    assert res.reassert is False and rec.base == Command("on", None)
+    assert rec.last_external.policy == "take_back"
+
+
+def test_a_second_device_change_inside_the_cooldown_is_a_take_back():
+    rec = record(Command("on", 200), layer("sleep", 50, OFF_COMMAND))
+    first = apply_external(rec, Command("on", None), None, "device", "reassert", NOW)
+    assert first.reassert
+    second = apply_external(rec, Command("on", None), None, "device", "reassert", NOW + 10)
+    assert second.reassert is False and second.dropped == ("sleep",)
+    assert rec.layers == {} and rec.last_external.policy == "take_back"
+
+
+def test_a_device_change_after_the_cooldown_reasserts_again():
+    rec = record(Command("on", 200), layer("sleep", 50, OFF_COMMAND))
+    assert apply_external(rec, Command("on", None), None, "device", "reassert", NOW).reassert
+    assert apply_external(rec, Command("on", None), None, "device", "reassert", NOW + 31).reassert
+    assert "sleep" in rec.layers

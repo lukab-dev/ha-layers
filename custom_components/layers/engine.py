@@ -42,6 +42,7 @@ from .const import (
     CONF_DEFAULT_POLICY,
     CONF_EDIT_ACTIVE,
     CONF_ENTITIES,
+    CONF_REASSERT,
     DECISION_BUFFER,
     DOMAIN,
     EVENT_EXTERNAL,
@@ -71,6 +72,7 @@ from .logic.capability import (
 )
 from .logic.model import (
     CALL_MEMORY_S,
+    Caps,
     DEBOUNCE_S,
     DIV_DELIVERY,
     DIV_MANUAL_KEEP,
@@ -78,22 +80,22 @@ from .logic.model import (
     DIV_UNSYNCED,
     LATE_WINDOW_DEFAULT_S,
     LATE_WINDOW_S,
+    LastCommand,
     OFF,
     ON,
+    Observed,
+    Owed,
     POLICY_BASE_KEEP_LAYERS,
     POLICY_EDIT_ACTIVE,
+    POLICY_REASSERT,
     POLICY_TAKE_BACK,
     REPLAY_QUIET_S,
     RETURN_SETTLE_S,
+    Record,
     SRC_AUTOMATION,
     SRC_DEVICE,
     SRC_USER,
     STARTUP_GRACE_S,
-    Caps,
-    LastCommand,
-    Observed,
-    Owed,
-    Record,
     SetRequest,
 )
 from .logic.resolve import resolve
@@ -147,6 +149,7 @@ class Engine:
         self.default_policy: str = opts.get(CONF_DEFAULT_POLICY, POLICY_TAKE_BACK)
         self.edit_active: set[str] = set(opts.get(CONF_EDIT_ACTIVE, []))
         self.base_keep: set[str] = set(opts.get(CONF_BASE_KEEP, []))
+        self.reassert: set[str] = set(opts.get(CONF_REASSERT, []))
         self.records: dict[str, Record] = {}
         self.apply = False
         self.seq = 0
@@ -362,6 +365,8 @@ class Engine:
             return POLICY_EDIT_ACTIVE
         if eid in self.base_keep:
             return POLICY_BASE_KEEP_LAYERS
+        if eid in self.reassert:
+            return POLICY_REASSERT
         return self.default_policy
 
     def holds_layers(self, eid: str) -> bool:
@@ -512,7 +517,7 @@ class Engine:
         self.enrolled.add(new)
         self._platforms[new] = self._platforms.pop(old, "")
         options = dict(self.entry.options)
-        for key in (CONF_ENTITIES, CONF_EDIT_ACTIVE, CONF_BASE_KEEP):
+        for key in (CONF_ENTITIES, CONF_EDIT_ACTIVE, CONF_BASE_KEEP, CONF_REASSERT):
             options[key] = [new if e == old else e for e in options.get(key, [])]
         self.hass.config_entries.async_update_entry(self.entry, options=options)
         self.hass.config_entries.async_schedule_reload(self.entry.entry_id)
@@ -678,6 +683,11 @@ class Engine:
                 {ATTR_ENTITY_ID: eid, "source": verdict.source, "policy": policy,
                  "dropped": list(result.dropped), "edited": result.edited},
             )
+        if result.reassert:
+            # The one policy that answers an external change with a command (7.3 g):
+            # the device changed itself, the effective command goes back on it.
+            self._decision(eid, "reassert", source=verdict.source)
+            self._render(eid, reason="reassert", parent_id=None, deferred=True)
         self._schedule_ttl()
         self.save()
         self.notify()

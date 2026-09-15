@@ -39,7 +39,16 @@ RESERVED_LAYER_IDS = frozenset({LAYER_BASE, LAYER_ACTIVE, LAYER_ALL})
 POLICY_TAKE_BACK = "take_back"
 POLICY_EDIT_ACTIVE = "edit_active"
 POLICY_BASE_KEEP_LAYERS = "base_keep_layers"
-POLICIES = (POLICY_TAKE_BACK, POLICY_EDIT_ACTIVE, POLICY_BASE_KEEP_LAYERS)
+# reassert: a change with no service call behind it (a smart plug that comes back on
+# by itself, a relay's power-on default) is the device misbehaving, never a person:
+# the base and the layers stay and the effective command is sent again. A change
+# from the app or an automation still takes the lamp back, and so does a second
+# device change inside REASSERT_COOLDOWN_S (someone is at the device's own button).
+# Per-entity only: it must not be the default for a house with wall switches.
+POLICY_REASSERT = "reassert"
+POLICIES = (POLICY_TAKE_BACK, POLICY_EDIT_ACTIVE, POLICY_BASE_KEEP_LAYERS, POLICY_REASSERT)
+DEFAULT_POLICIES = (POLICY_TAKE_BACK, POLICY_EDIT_ACTIVE, POLICY_BASE_KEEP_LAYERS)
+REASSERT_COOLDOWN_S = 30.0
 
 ON_EXPIRE_SAFE = "safe"      # an expiry may turn a lamp off or dim it, never on or brighter
 ON_EXPIRE_RENDER = "render"  # an expiry renders whatever is below, like an explicit clear

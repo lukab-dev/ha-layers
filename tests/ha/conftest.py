@@ -46,6 +46,7 @@ from custom_components.layers.const import (
     CONF_DEFAULT_POLICY,
     CONF_EDIT_ACTIVE,
     CONF_ENTITIES,
+    CONF_REASSERT,
     DOMAIN,
 )
 
@@ -280,6 +281,7 @@ async def setup_layers(
     policy: str = "take_back",
     edit_active: list[str] | None = None,
     base_keep: list[str] | None = None,
+    reassert: list[str] | None = None,
     apply: bool = True,
     end_grace: bool = True,
 ) -> MockConfigEntry:
@@ -292,6 +294,7 @@ async def setup_layers(
             CONF_DEFAULT_POLICY: policy,
             CONF_EDIT_ACTIVE: edit_active or [],
             CONF_BASE_KEEP: base_keep or [],
+            CONF_REASSERT: reassert or [],
         },
     )
     entry.add_to_hass(hass)

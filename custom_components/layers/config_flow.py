@@ -28,10 +28,11 @@ from .const import (
     CONF_DEFAULT_POLICY,
     CONF_EDIT_ACTIVE,
     CONF_ENTITIES,
+    CONF_REASSERT,
     DOMAIN,
     MANAGED_DOMAINS,
 )
-from .logic.model import POLICIES, POLICY_TAKE_BACK
+from .logic.model import DEFAULT_POLICIES, POLICY_TAKE_BACK
 
 GROUP_ATTRS = ("entity_id", "is_hue_group", "group_entities")
 
@@ -43,7 +44,7 @@ def _lamps_selector() -> EntitySelector:
 def _policy_selector() -> SelectSelector:
     return SelectSelector(
         SelectSelectorConfig(
-            options=list(POLICIES), mode=SelectSelectorMode.DROPDOWN, translation_key="policy"
+            options=list(DEFAULT_POLICIES), mode=SelectSelectorMode.DROPDOWN, translation_key="policy"
         )
     )
 
@@ -90,6 +91,7 @@ class LayersConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_DEFAULT_POLICY: user_input[CONF_DEFAULT_POLICY],
                         CONF_EDIT_ACTIVE: [],
                         CONF_BASE_KEEP: [],
+                        CONF_REASSERT: [],
                     },
                 )
         schema = vol.Schema(
@@ -119,6 +121,7 @@ class LayersOptionsFlow(OptionsFlowWithReload):
             lamps = user_input[CONF_ENTITIES]
             edit = user_input.get(CONF_EDIT_ACTIVE, [])
             keep = user_input.get(CONF_BASE_KEEP, [])
+            reassert = user_input.get(CONF_REASSERT, [])
             removed = set(options.get(CONF_ENTITIES, [])) - set(lamps)
             holding = self._holding_layers(removed)
             if bad := not_a_lamp(self.hass, lamps):
@@ -128,10 +131,13 @@ class LayersOptionsFlow(OptionsFlowWithReload):
                 # Un-enrolling a held lamp would strand it: nothing would ever release it.
                 errors[CONF_ENTITIES] = "holds_layers"
                 placeholders["entities"] = ", ".join(sorted(holding))
-            elif stray := sorted((set(edit) | set(keep)) - set(lamps)):
-                errors[CONF_EDIT_ACTIVE if set(edit) - set(lamps) else CONF_BASE_KEEP] = "not_enrolled"
+            elif stray := sorted((set(edit) | set(keep) | set(reassert)) - set(lamps)):
+                field = (CONF_EDIT_ACTIVE if set(edit) - set(lamps)
+                         else CONF_BASE_KEEP if set(keep) - set(lamps) else CONF_REASSERT)
+                errors[field] = "not_enrolled"
                 placeholders["entities"] = ", ".join(stray)
-            elif both := sorted(set(edit) & set(keep)):
+            elif both := sorted((set(edit) & set(keep)) | (set(edit) & set(reassert))
+                                | (set(keep) & set(reassert))):
                 errors[CONF_BASE_KEEP] = "both_policies"
                 placeholders["entities"] = ", ".join(both)
             else:
@@ -141,6 +147,7 @@ class LayersOptionsFlow(OptionsFlowWithReload):
                         CONF_DEFAULT_POLICY: user_input[CONF_DEFAULT_POLICY],
                         CONF_EDIT_ACTIVE: edit,
                         CONF_BASE_KEEP: keep,
+                        CONF_REASSERT: reassert,
                     }
                 )
         current = user_input or options
@@ -152,6 +159,7 @@ class LayersOptionsFlow(OptionsFlowWithReload):
                 ): _policy_selector(),
                 vol.Optional(CONF_EDIT_ACTIVE, default=current.get(CONF_EDIT_ACTIVE, [])): _lamps_selector(),
                 vol.Optional(CONF_BASE_KEEP, default=current.get(CONF_BASE_KEEP, [])): _lamps_selector(),
+                vol.Optional(CONF_REASSERT, default=current.get(CONF_REASSERT, [])): _lamps_selector(),
             }
         )
         return self.async_show_form(

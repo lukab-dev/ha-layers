@@ -281,11 +281,20 @@ it is unknown when the report is missing or unavailable.
   command, `diverged = manual_keep` (no snap-back: the lamp keeps showing the
   person's change until `layers.sync`). Otherwise `diverged` follows the
   `take_back` partial rule.
+- `reassert` (per-entity only, never the default): a `device` change (no service
+  call behind it) while a layer is active is the device misbehaving, not a
+  person. The base and the layers stay, `diverged = delivery`, and the result's
+  `reassert` is true: the engine re-renders the effective command (7.3 g). A
+  `user` or `automation` change, a change with no active layer, or a second
+  `device` change within `REASSERT_COOLDOWN_S` (30 s) of a reassert — someone is
+  at the device's own button — is a `take_back` (recorded as such in
+  `last_external.policy`, so the cooldown is measured from the last reassert).
 - `replay` (`POLICY_REPLAY`) → `apply_replay` below, so a `FOLLOW_UP` can
   re-apply `last_external.policy` as it is.
-- `take_back`, `edit_active`, `base_keep_layers`: `owed = None`. All policies:
-  `last_external = External(..., groups)`. None touches `last_layers_change`.
-- `ExternalResult(dropped: tuple[str, ...], edited: str | None, partial: bool)`.
+- `take_back`, `edit_active`, `base_keep_layers`, `reassert`: `owed = None`. All
+  policies: `last_external = External(..., groups)`. None touches `last_layers_change`.
+- `ExternalResult(dropped: tuple[str, ...], edited: str | None, partial: bool,
+  reassert: bool)`.
 
 `apply_replay(rec, shown, groups, source, now, user_id=None) -> ExternalResult`:
 a foreign press that the replay rule (6.1) caught. `base = merge_command(base,
@@ -627,9 +636,12 @@ Only:
 (e) retries of (a)–(d), (f), and `FAILED_DELIVERY` of our own command (once per
     command, 7.2);
 (f) the re-render `REPLAY_QUIET_S` after the last replayed foreign call on a
-    lamp (5.3 `apply_replay`), putting its layers back.
+    lamp (5.3 `apply_replay`), putting its layers back;
+(g) a `device` change on an entity with the `reassert` policy while a layer is
+    active (5.3), after the usual debounce or return settle — the one case an
+    external change answers with a command, and only on entities so configured.
 
-Never because of an external change, never at startup otherwise, never while
+Never because of an external change otherwise, never at startup otherwise, never while
 the apply switch is off, never to a lamp whose effective command is `None`.
 (c)-(f) never push a lamp that is `unsynced` or `manual_keep`, nor one that is
 `untrusted`; a render skipped for one of those reasons, or because the apply

@@ -20,6 +20,7 @@ CONF_ENTITIES: Final = "entities"
 CONF_DEFAULT_POLICY: Final = "default_policy"
 CONF_EDIT_ACTIVE: Final = "edit_active_entities"
 CONF_BASE_KEEP: Final = "base_keep_layers_entities"
+CONF_REASSERT: Final = "reassert_entities"
 
 # Services
 SERVICE_SET: Final = "set"
