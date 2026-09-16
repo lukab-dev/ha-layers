@@ -1007,9 +1007,23 @@ def test_a_dimmer_moving_away_from_our_target_during_our_render_is_a_person():
     # Our dim to 64 is in flight; a report with no context (a Hue dimmer) has the lamp
     # jump to 180. Verification would re-send 64 over them six times: it is the
     # person's change, and the engine cancels the render.
-    rec, rt = _rendering(Command("on", 64))
+    rec, rt = _rendering(Command("on", 64), at=NOW - 5)     # past RAMP_GRACE_S
     ev = event(obs("on", 70, kelvin=2700), obs("on", 180, kelvin=2700))
     assert classify_state(rec, ev, rt, HUE, NOW) == Verdict(EXTERNAL, "device")
+
+
+def test_a_move_away_inside_the_ramp_grace_is_the_lamp_ramping():
+    # Incident 2026-09-16: an IKEA Matter globe answered our nightlight (26) with
+    # "on" at its old level, then ramped down, all inside a second and with no
+    # context. The second report was "further" than the first and the globe was
+    # taken back: it sat at the nightlight level all day. Inside RAMP_GRACE_S of our
+    # command a move away is the lamp, not a person.
+    rec, rt = _rendering(Command("on", 26), at=NOW - 0.5)
+    ev = event(obs("on", 26, kelvin=2202), obs("on", 255, kelvin=2202))
+    assert classify_state(rec, ev, rt, MATTER, NOW) == Verdict(NOISE)
+    # The same move 3 s after the command is a person at a dimmer, as before.
+    rec, rt = _rendering(Command("on", 26), at=NOW - 3.5)
+    assert classify_state(rec, ev, rt, MATTER, NOW) == Verdict(EXTERNAL, "device")
 
 
 def test_a_step_towards_our_target_during_our_render_is_still_noise():

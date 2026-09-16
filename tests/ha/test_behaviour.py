@@ -59,6 +59,7 @@ from custom_components.layers.logic.model import (
 )
 
 from custom_components.layers import render as render_module
+from custom_components.layers.logic import classify as classify_module
 
 from .conftest import FakeLamp, settle, setup_layers
 
@@ -1157,6 +1158,9 @@ async def test_a_dimmer_during_our_render_cancels_it_instead_of_being_fought(
     """A person at a Hue dimmer while our render is still verifying: their change is
     taken, the render is cancelled, and nothing is re-sent over them."""
     monkeypatch.setattr(render_module, "SETTLE_S", 0.3)
+    # The ramp grace (a lamp echoing its old level inside RAMP_GRACE_S of our command
+    # is noise) is tested in tests/logic; here the person moves the dimmer "later".
+    monkeypatch.setattr(classify_module, "RAMP_GRACE_S", 0.0)
     engine = await start(hass, [A])
     lamp = lights["a"]
     await layers(hass, "set", entity_id=A, layer="tv", priority=40, mode="adjust", brightness=64)

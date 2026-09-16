@@ -593,6 +593,12 @@ SETTLE_S = 2.0              # wait after a command before verifying
 SLOW_OFF_S = 15.0           # Hue can report an optimistic off and correct it ~10 s later
 LATE_RECHECK_S = 45.0       # second verification for platforms with late reversals
 LATE_WINDOW_S = {"hue": 60.0}   # no-context reversal after a command = failed delivery
+# A lamp answering our command may first echo its previous level, or its power-on
+# level, and then ramp to the target; those reports arrive within a second or two.
+# Inside this window after our command a no-context brightness/colour move while our
+# render runs is the lamp, not a person at a dimmer. Measured 2026-09-16 on an IKEA
+# KAJPLATS Matter globe: 4-20 reports in the 0.7-3 s after each turn_on.
+RAMP_GRACE_S = 3.0
 LATE_WINDOW_DEFAULT_S = 15.0
 DEBOUNCE_S = 3.0            # judge a no-context change only after it has held this long
 FOLLOW_UP_S = 10.0          # attribute tails after an external change

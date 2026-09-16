@@ -42,6 +42,9 @@ from .capability import (
 from .model import (
     COLOR_KELVIN,
     COLOR_XY,
+    Call,
+    Caps,
+    Command,
     DIV_MANUAL_KEEP,
     DIV_UNSYNCED,
     FOLLOW_UP_S,
@@ -54,6 +57,9 @@ from .model import (
     OFF_COMMAND,
     ON,
     OWED_ON_MAX_AGE_S,
+    Observed,
+    RAMP_GRACE_S,
+    Record,
     SRC_AUTOMATION,
     SRC_DEVICE,
     SRC_OURS,
@@ -61,11 +67,6 @@ from .model import (
     TOL_BRIGHTNESS,
     TOL_KELVIN,
     TOL_XY,
-    Call,
-    Caps,
-    Command,
-    Observed,
-    Record,
 )
 from .resolve import active_layer, resolve, state_holder
 
@@ -392,13 +393,21 @@ def classify_state(rec: Record, ev: StateEvent, rt: Runtime, caps: Caps, now: fl
         return Verdict(NOISE)       # decide_return judges the lamp once it has settled
     last = rec.last_command
     if rt.render_alive and (last is None or last.ours):
-        if not reused and last is not None and _moved_away(old, new, last.target, caps):
+        if (
+            not reused
+            and last is not None
+            and now - last.at > RAMP_GRACE_S
+            and _moved_away(old, new, last.target, caps)
+        ):
             # A person at a dimmer while our render runs: the lamp kept our on/off but
             # its brightness or colour moved away from our target. Verification would
             # re-send over them, up to six times. A flip stays noise (a bridge's
             # optimistic off corrected later); a step towards the target is a transition;
             # a report still carrying our context is the lamp answering our call (one
-            # that clamps what it was sent) and is left to the verification.
+            # that clamps what it was sent) and is left to the verification. Inside
+            # RAMP_GRACE_S of our command it is the lamp ramping (an echo of its old or
+            # power-on level before the fade) and is noise too - measured on a Matter
+            # globe that took its nightlight back this way twice (2026-09-16).
             return Verdict(EXTERNAL, source=SRC_DEVICE)
         return Verdict(NOISE)       # our render's verification judges it (and retries)
     if (
