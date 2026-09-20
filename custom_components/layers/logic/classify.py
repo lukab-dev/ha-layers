@@ -40,6 +40,7 @@ from .capability import (
     raises_output,
 )
 from .model import (
+    ARRIVED_HOLD_S,
     COLOR_KELVIN,
     COLOR_XY,
     Call,
@@ -58,7 +59,6 @@ from .model import (
     ON,
     OWED_ON_MAX_AGE_S,
     Observed,
-    RAMP_GRACE_S,
     Record,
     SRC_AUTOMATION,
     SRC_DEVICE,
@@ -286,6 +286,17 @@ def _consistent(old: Observed, new: Observed, target: Command, caps: Caps) -> bo
     return not _further(old, new, call)
 
 
+def shows_target(new: Observed | None, target: Command | None, caps: Caps) -> bool:
+    """Does this report show the lamp at ``target``? (What keeps ``LastCommand.matched_at``.)
+
+    A lamp that clamps the colour it was sent (``colour_off``) has arrived too:
+    verification accepts it, and it will never match any closer.
+    """
+    if new is None or target is None or target.state not in (ON, OFF):
+        return False
+    return matches(new, project(target, caps), caps) != MATCH_NO
+
+
 def _moved_away(old: Observed, new: Observed, target: Command | None, caps: Caps) -> bool:
     """``new`` kept ``target``'s on/off but got further from it than ``old`` was (no flip)."""
     if target is None or target.state not in (ON, OFF) or _flipped(old, new):
@@ -396,7 +407,8 @@ def classify_state(rec: Record, ev: StateEvent, rt: Runtime, caps: Caps, now: fl
         if (
             not reused
             and last is not None
-            and now - last.at > RAMP_GRACE_S
+            and last.matched_at is not None
+            and now - last.matched_at >= ARRIVED_HOLD_S
             and _moved_away(old, new, last.target, caps)
         ):
             # A person at a dimmer while our render runs: the lamp kept our on/off but
@@ -404,10 +416,19 @@ def classify_state(rec: Record, ev: StateEvent, rt: Runtime, caps: Caps, now: fl
             # re-send over them, up to six times. A flip stays noise (a bridge's
             # optimistic off corrected later); a step towards the target is a transition;
             # a report still carrying our context is the lamp answering our call (one
-            # that clamps what it was sent) and is left to the verification. Inside
-            # RAMP_GRACE_S of our command it is the lamp ramping (an echo of its old or
-            # power-on level before the fade) and is noise too - measured on a Matter
-            # globe that took its nightlight back this way twice (2026-09-16).
+            # that clamps what it was sent) and is left to the verification.
+            #
+            # Only a lamp that has already ARRIVED at our target can be moved away from
+            # it by a person: it has shown the target for ARRIVED_HOLD_S with no other
+            # report since (``last.matched_at``, kept by the engine). Until then a move
+            # away is the lamp still answering - an echo of a remembered or power-on
+            # level before the fade. This is measured from the lamp's own reports, so it
+            # holds however late the answer is, which a window after our command cannot:
+            # a Matter-over-Thread globe answered 0.7-3 s after the command on 2026-09-16
+            # and 5.2 s after it on 2026-09-19, past Home Assistant's 5 s context reuse,
+            # and was taken back both times - it then sat at the nightlight level all
+            # day. The price: a person who moves a dimmer before the lamp has arrived is
+            # sent over once by the verification, and is recognised from their next move.
             return Verdict(EXTERNAL, source=SRC_DEVICE)
         return Verdict(NOISE)       # our render's verification judges it (and retries)
     if (

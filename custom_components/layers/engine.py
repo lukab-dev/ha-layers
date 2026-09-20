@@ -579,6 +579,14 @@ class Engine:
 
         # From here the lamp is available and its state changed.
         rec.observed = new
+        last = rec.last_command
+        if last is not None and last.ours:
+            # Since when has the lamp shown our command's target with nothing else in
+            # between? Any other report restarts it (classify_state: ARRIVED_HOLD_S).
+            if not cl.shows_target(new, last.target, caps):
+                last.matched_at = None
+            elif last.matched_at is None:
+                last.matched_at = now
         if kind == cl.OURS:
             if new is not None and new.state == OFF:
                 pol.lift_on_off(rec)

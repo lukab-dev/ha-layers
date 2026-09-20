@@ -1158,9 +1158,9 @@ async def test_a_dimmer_during_our_render_cancels_it_instead_of_being_fought(
     """A person at a Hue dimmer while our render is still verifying: their change is
     taken, the render is cancelled, and nothing is re-sent over them."""
     monkeypatch.setattr(render_module, "SETTLE_S", 0.3)
-    # The ramp grace (a lamp echoing its old level inside RAMP_GRACE_S of our command
-    # is noise) is tested in tests/logic; here the person moves the dimmer "later".
-    monkeypatch.setattr(classify_module, "RAMP_GRACE_S", 0.0)
+    # A lamp has arrived once it has shown our target for ARRIVED_HOLD_S (tests/logic
+    # covers the hold); here it counts as arrived at once, so the person's move is "later".
+    monkeypatch.setattr(classify_module, "ARRIVED_HOLD_S", 0.0)
     engine = await start(hass, [A])
     lamp = lights["a"]
     await layers(hass, "set", entity_id=A, layer="tv", priority=40, mode="adjust", brightness=64)
@@ -1175,6 +1175,35 @@ async def test_a_dimmer_during_our_render_cancels_it_instead_of_being_fought(
     assert rec.base == Command("on", 200, Color.kelvin(2700))
     assert brightness(hass, A) == 200
     assert len(sent_by_layers(lamp, renders)) == 1     # no retry over the person
+
+
+async def test_a_lamp_that_echoes_the_target_then_fades_is_not_taken_back(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], renders: list[Event],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incidents 2026-09-16 and 2026-09-19: a Matter globe answers a nightlight with the
+    target (a remembered level), jumps to its power-on level and fades down, with no
+    context on any of it. However late that starts, it is the lamp answering: the layer
+    stays, nothing is re-sent, and the clear gives the lamp back to its base."""
+    monkeypatch.setattr(render_module, "SETTLE_S", 0.6)
+    engine = await start(hass, [A])
+    lamp = lights["a"]
+    await layers(hass, "set", entity_id=A, layer="night", priority=50, brightness=26)
+    await hass.async_block_till_done()
+    await asyncio.sleep(0.05)
+    assert engine.renderer.alive(A)
+    for level in (255, 200, 120, 60, 26):               # the jump, then the fade
+        lamp.push(brightness=level, context=Context())
+        await asyncio.sleep(0.05)
+    await settle(hass, 0.8)
+    rec = engine.records[A]
+    assert "external" not in kinds(engine, A)
+    assert set(rec.layers) == {"night"} and rec.tombstones == {}
+    assert brightness(hass, A) == 26
+    assert len(sent_by_layers(lamp, renders)) == 1     # verified, not re-sent
+    await layers(hass, "clear", layer="night")
+    await settle(hass)
+    assert engine.records[A].layers == {}
 
 
 async def test_a_missed_command_in_shadow_mode_is_not_owed_forever(

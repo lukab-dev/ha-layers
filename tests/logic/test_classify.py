@@ -997,33 +997,70 @@ def test_changed_groups():
 # --------------------------------------------------------------------------- #
 
 
-def _rendering(target: Command, *, at: float = NOW - 3) -> tuple[Record, Runtime]:
+def _rendering(target: Command, *, at: float = NOW - 3,
+               matched_at: float | None = None) -> tuple[Record, Runtime]:
     rec = record(Command("on", 200), layer("tv", 40, target, "set" if target.state else "adjust"))
-    rec.last_command = LastCommand(at, ours=True, source="ours", target=target, context_id="ctx-r")
+    rec.last_command = LastCommand(at, ours=True, source="ours", target=target, context_id="ctx-r",
+                                   matched_at=matched_at)
     return rec, Runtime(render_alive=True, ours={"ctx-r": OurCommand("ctx-r", target, at)})
 
 
 def test_a_dimmer_moving_away_from_our_target_during_our_render_is_a_person():
-    # Our dim to 64 is in flight; a report with no context (a Hue dimmer) has the lamp
-    # jump to 180. Verification would re-send 64 over them six times: it is the
-    # person's change, and the engine cancels the render.
-    rec, rt = _rendering(Command("on", 64), at=NOW - 5)     # past RAMP_GRACE_S
-    ev = event(obs("on", 70, kelvin=2700), obs("on", 180, kelvin=2700))
+    # Our dim to 64 has ARRIVED: the lamp has shown it for ARRIVED_HOLD_S with nothing
+    # else in between. A report with no context (a Hue dimmer) then has the lamp jump to
+    # 180. Verification would re-send 64 over them six times: it is the person's
+    # change, and the engine cancels the render.
+    rec, rt = _rendering(Command("on", 64), at=NOW - 5, matched_at=NOW - 4)
+    ev = event(obs("on", 64, kelvin=2700), obs("on", 180, kelvin=2700))
     assert classify_state(rec, ev, rt, HUE, NOW) == Verdict(EXTERNAL, "device")
 
 
-def test_a_move_away_inside_the_ramp_grace_is_the_lamp_ramping():
+def test_a_move_away_before_the_lamp_has_arrived_is_the_lamp_still_answering():
     # Incident 2026-09-16: an IKEA Matter globe answered our nightlight (26) with
-    # "on" at its old level, then ramped down, all inside a second and with no
-    # context. The second report was "further" than the first and the globe was
-    # taken back: it sat at the nightlight level all day. Inside RAMP_GRACE_S of our
-    # command a move away is the lamp, not a person.
-    rec, rt = _rendering(Command("on", 26), at=NOW - 0.5)
+    # "on" at a remembered level - 26, the target itself - then jumped to its power-on
+    # level and faded down, reports 0.1 s apart and with no context. The jump was
+    # "further from the target" and the globe was taken back: it sat at the nightlight
+    # level all day. A target shown for 0.1 s is an echo, not an arrival.
     ev = event(obs("on", 26, kelvin=2202), obs("on", 255, kelvin=2202))
+    rec, rt = _rendering(Command("on", 26), at=NOW - 0.5, matched_at=NOW - 0.1)
     assert classify_state(rec, ev, rt, MATTER, NOW) == Verdict(NOISE)
-    # The same move 3 s after the command is a person at a dimmer, as before.
-    rec, rt = _rendering(Command("on", 26), at=NOW - 3.5)
+    # The lamp has not shown the target at all yet (its first report is the jump).
+    rec, rt = _rendering(Command("on", 26), at=NOW - 0.5)
+    assert classify_state(rec, ev, rt, MATTER, NOW) == Verdict(NOISE)
+
+
+@pytest.mark.parametrize("sent_ago", [5.2, 31.8, 120.0])
+def test_how_late_the_lamp_answers_never_makes_its_answer_a_person(sent_ago):
+    # Incident 2026-09-19: on a lossy Thread link the command landed 5.2 s after it was
+    # sent (one of Matter's own retransmissions), another night 31.8 s and four sends
+    # later. The same echo-then-fade then arrived with no context - Home Assistant
+    # reuses a command's context for 5 s only - and past the old 3 s window after the
+    # command, so it was read as a person. The age of the command is not evidence.
+    ev = event(obs("on", 26, kelvin=2202), obs("on", 255, kelvin=2202))
+    rec, rt = _rendering(Command("on", 26), at=NOW - sent_ago, matched_at=NOW - 0.1)
+    assert classify_state(rec, ev, rt, MATTER, NOW) == Verdict(NOISE)
+    rec, rt = _rendering(Command("on", 26), at=NOW - sent_ago)
+    assert classify_state(rec, ev, rt, MATTER, NOW) == Verdict(NOISE)
+
+
+def test_arrival_is_measured_from_the_lamps_report_not_from_our_command():
+    ev = event(obs("on", 26, kelvin=2202), obs("on", 180, kelvin=2202))
+    # Shown for just under the hold: still the lamp. Shown for the hold: a person.
+    rec, rt = _rendering(Command("on", 26), at=NOW - 60, matched_at=NOW - 2.9)
+    assert classify_state(rec, ev, rt, MATTER, NOW) == Verdict(NOISE)
+    rec, rt = _rendering(Command("on", 26), at=NOW - 60, matched_at=NOW - 3.0)
     assert classify_state(rec, ev, rt, MATTER, NOW) == Verdict(EXTERNAL, "device")
+
+
+def test_shows_target():
+    from layers_logic.classify import shows_target
+
+    assert shows_target(obs("on", 26, kelvin=2202), Command("on", 26), MATTER)
+    assert not shows_target(obs("on", 255, kelvin=2202), Command("on", 26), MATTER)
+    assert not shows_target(OFF, Command("on", 26), MATTER)
+    assert shows_target(OFF, OFF_COMMAND, MATTER)
+    assert not shows_target(None, Command("on", 26), MATTER)
+    assert not shows_target(obs("on", 26), None, MATTER)
 
 
 def test_a_step_towards_our_target_during_our_render_is_still_noise():

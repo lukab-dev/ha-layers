@@ -428,12 +428,21 @@ command=None)`, kinds in the order they are tested:
       render of ours starts on it: our newer command's reports are ours.)
    2. `rt.returning` → `NOISE`: `decide_return` judges the lamp.
       `rt.render_alive` with `rec.last_command` ours (or none): `NOISE`, our
-      render's verification judges the lamp (and retries) — except a report
-      without our context that keeps our target's on/off but moves its
-      brightness or colour further from the target than the report before
-      (`_further`, beyond tolerance): that is a person at a dimmer while we
-      render, → `EXTERNAL(source=device)`, and the engine cancels the render
-      instead of re-sending over them six times. A flip stays noise (a bridge's
+      render's verification judges the lamp (and retries) — except, once the
+      lamp has ARRIVED, a report without our context that keeps our target's
+      on/off but moves its brightness or colour further from the target than
+      the report before (`_further`, beyond tolerance): that is a person at a
+      dimmer while we render, → `EXTERNAL(source=device)`, and the engine
+      cancels the render instead of re-sending over them six times. ARRIVED:
+      the lamp has shown the target for `ARRIVED_HOLD_S` with no other report
+      in between (`last_command.matched_at`, kept by the engine from the lamp's
+      own reports, not persisted). It is never measured from when the command
+      was sent: a lamp may answer seconds late (a lossy mesh, a retransmission
+      past Home Assistant's 5 s context reuse) and may first echo a remembered
+      level — the target itself, for a nightlight — then jump to its power-on
+      level and fade. Before arrival a move away is the lamp still answering;
+      a person who moves a dimmer then is sent over once by the verification
+      and recognised from their next move. A flip stays noise (a bridge's
       optimistic off corrected later); a step towards the target is a
       transition; a report carrying our context inside Home Assistant's 5 s
       reuse is the lamp answering our call (one that clamps what it was sent)
