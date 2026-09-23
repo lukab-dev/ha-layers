@@ -175,7 +175,9 @@ turns that rule off.) A `layers.clear` always restores fully.
 
 Layers can tell its own commands apart from everything else. Anything else that changes
 a managed light counts as "someone": a person at the switch, the app, voice, a scene, or
-another automation.
+another automation. A scene counts even for a light it didn't need to change: Home
+Assistant sends nothing to a light that already looks the way the scene wants, and Layers
+treats that light as if the scene had set it.
 
 By default (**Take it back**), their change wins. It becomes the light's new base, and the
 layers on that light are removed, on that light only. The automation can't put the same

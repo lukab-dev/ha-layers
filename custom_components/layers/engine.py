@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass, field
 import logging
 from typing import Any
 
@@ -100,6 +101,7 @@ from .logic.model import (
 )
 from .logic.resolve import resolve
 from .render import Renderer, RenderJob
+from . import scenes
 from .store import LayersStore
 from .targets import normalise_call
 
@@ -113,6 +115,7 @@ HANDOFF_OURS = "ours_handoff"   # hass.data[DOMAIN] key: our live contexts, acro
 BASE_SRC_OBSERVED = "observed"  # base_source when a set on a lamp with no base learns what it shows
 SAVE_DELAY_S = 2.0              # model changes
 SAVE_LAZY_S = 60.0              # observed-only changes
+SCENE_SETTLE_S = 2.0            # a scene's calls to its members all start well inside this
 
 # Divergences that only layers.sync repairs: no deferred render pushes them (SPEC 2).
 DIV_SYNC_ONLY = frozenset({DIV_MANUAL_KEEP, DIV_UNSYNCED})
@@ -121,6 +124,22 @@ DIV_SYNC_ONLY = frozenset({DIV_MANUAL_KEEP, DIV_UNSYNCED})
 @callback
 def _light_call_filter(event_data: dict[str, Any]) -> bool:
     return event_data.get("domain") in MANAGED_DOMAINS and event_data.get("service") in LIGHT_SERVICES
+
+
+@callback
+def _scene_call_filter(event_data: dict[str, Any]) -> bool:
+    return event_data.get("domain") == scenes.SCENE_DOMAIN and event_data.get("service") in scenes.SCENE_SERVICES
+
+
+@dataclass(slots=True)
+class _SceneRun:
+    """A scene call waiting to see which members it skipped (see scenes.py)."""
+
+    user_id: str | None
+    at: float
+    wanted: dict[str, State]
+    may_control: Callable[[str, str], bool] | None
+    reached: set[str] = field(default_factory=set)
 
 
 def _on_off(obs: Observed | None) -> str | None:
@@ -170,6 +189,7 @@ class Engine:
         self._failed: set[str] = set()
         self._late_retried: set[str] = set()
         self._releases: dict[str, CALLBACK_TYPE] = {}
+        self._scenes: dict[str, _SceneRun] = {}          # scene call context id -> run
         self._save_due: float | None = None
         self._setup_before_start = hass.state is not CoreState.running
         self._stopping = False
@@ -207,6 +227,9 @@ class Engine:
             self.hass.bus.async_listen(EVENT_CALL_SERVICE, self._on_call, event_filter=_light_call_filter)
         )
         self._unsubs.append(
+            self.hass.bus.async_listen(EVENT_CALL_SERVICE, self._on_scene_call, event_filter=_scene_call_filter)
+        )
+        self._unsubs.append(
             self.hass.bus.async_listen(
                 er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry_update,
                 event_filter=self._renamed_lamp,
@@ -220,6 +243,7 @@ class Engine:
             unsub()
         self._timers.clear()
         self._releases.clear()
+        self._scenes.clear()
         if self._ttl_unsub:
             self._ttl_unsub()
             self._ttl_unsub = None
@@ -810,6 +834,8 @@ class Engine:
             self.hass, event.data.get("service_data") or {}, service,
             {lamp for lamp in self.enrolled if lamp.split(".", 1)[0] == domain},
         )
+        if (run := self._scenes.get(ctx.id)) is not None:
+            run.reached |= lamps    # a member the scene sent a call: the call path has it
         if may_control is not None:
             # A lamp the caller may not control is left out: Home Assistant refuses it.
             lamps = frozenset(lamp for lamp in lamps if may_control(lamp, POLICY_CONTROL))
@@ -875,6 +901,91 @@ class Engine:
                  "dropped": list(result.dropped), "edited": result.edited},
             )
         return True
+
+    # ================================================================ scenes
+
+    @callback
+    def _on_scene_call(self, event: Event) -> None:
+        """A scene runs: note what it wants of each lamp, and later which it skipped."""
+        if self._is_ours(event.context.id):
+            return
+        if event.context.user_id:
+            self.entry.async_create_task(self.hass, self._on_user_scene_call(event),
+                                         f"{DOMAIN} user scene call", eager_start=True)
+            return
+        self._start_scene(event, None)
+
+    async def _on_user_scene_call(self, event: Event) -> None:
+        user = await self.hass.auth.async_get_user(event.context.user_id)
+        if user is None:
+            return
+        self._start_scene(event, None if user.is_admin else user.permissions.check_entity)
+
+    def _start_scene(self, event: Event, may_control: Callable[[str, str], bool] | None) -> None:
+        try:
+            wanted = scenes.scene_targets(
+                self.hass, event.data.get("service"), event.data.get("service_data") or {},
+                self.enrolled,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("layers: could not read a scene call")
+            return
+        if not wanted:
+            return
+        ctx = event.context
+        self._scenes[ctx.id] = _SceneRun(ctx.user_id, self.now(), wanted, may_control)
+        self._later("scene", ctx.id, SCENE_SETTLE_S, self._settle_scene)
+
+    def _settle_scene(self, context_id: str) -> None:
+        """Each member the scene sent nothing is treated as sent what the scene wanted.
+
+        Home Assistant skips a member that already matches, so no call and no
+        state change reveal it. The call the scene would have made goes through
+        the intent path (SPEC 6.3), which records it only if the lamp shows it.
+        """
+        run = self._scenes.pop(context_id, None)
+        if run is None:
+            return
+        source = SRC_USER if run.user_id else SRC_AUTOMATION
+        now = self.now()
+        changed = False
+        try:
+            for lamp, wanted in sorted(run.wanted.items()):
+                if lamp in run.reached or lamp not in self.records:
+                    continue
+                if run.may_control is not None and not run.may_control(lamp, POLICY_CONTROL):
+                    continue
+                try:
+                    changed |= self._scene_skipped(self.records[lamp], wanted, run, context_id,
+                                                   source, now)
+                except Exception:  # noqa: BLE001 — one lamp must not stop the others
+                    _LOGGER.exception("layers: could not apply a scene to %s", lamp)
+                    self._mark_untrusted(lamp)
+        finally:
+            if changed:
+                self._schedule_ttl()
+                self.save()
+                self.notify()
+
+    def _scene_skipped(self, rec: Record, wanted: State, run: _SceneRun, context_id: str,
+                       source: str, now: float) -> bool:
+        lamp = rec.entity_id
+        reproduced = scenes.reproduced_call(wanted)
+        if reproduced is None:
+            return False
+        service, data = reproduced
+        _lamps, _via, intent, groups = normalise_call(
+            self.hass, {ATTR_ENTITY_ID: lamp, **data}, service, {lamp}
+        )
+        call = cl.CallInfo(context_id, source, run.user_id, service, intent, groups,
+                           frozenset({lamp}), frozenset(), run.at)
+        # Only a call the lamp is known to show is recorded; checking first keeps a
+        # member that does not match from leaving a phantom command in its record.
+        if cl.classify_call(rec, call, self.caps(lamp), now) is None:
+            self._decision(lamp, "scene_skip_ignored", service=service)
+            return False
+        self._decision(lamp, "scene_skipped", service=service)
+        return self._call_on_lamp(rec, call, now)
 
     def _note_command(self, rec: Record, command: LastCommand, caps: Caps) -> None:
         """Record someone else's command as the lamp's last, for the late window.

@@ -556,6 +556,18 @@ still delivered, and why an adjust layer never lights a lamp on its return.
   control (`POLICY_CONTROL`; admins may control all); a call from an unknown user
   is ignored. The user is looked up in an eager task, which completes inside the
   event (the lookup does not suspend), before the call writes any state.
+- A second call listener keeps `domain == "scene"` and `service in {turn_on,
+  apply}` (`scenes.py`). Home Assistant's scenes send nothing to a member that
+  already matches (light and switch `reproduce_state` return early), so neither
+  path above would hear of it. The engine reads what the scene wants of each
+  enrolled member (`scene_config.states` of Home Assistant's own scenes, or
+  `apply`'s `entities`; a vendor scene lists none), then `SCENE_SETTLE_S` (2 s)
+  later takes each member that got no light/switch call under the scene's
+  context and builds the call `reproduce_state` would have made. It goes to
+  `classify_call` (6.3) first: only an `EXTERNAL_INTENT` is handled, as a call
+  (decision `scene_skipped`); anything else is dropped with no trace in the
+  record (decision `scene_skip_ignored`). A user's scene reaches only lamps that
+  user may control, as above.
 - `Runtime.returning` is true from a lamp's `TRANSPORT_UP` until its
   `decide_return` has run.
 - `GONE` (the entity was removed: its integration reloading, a deletion) is

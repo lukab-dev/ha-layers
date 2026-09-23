@@ -5,13 +5,7 @@ If you want something on this list, or something that isn't, open an issue.
 
 ## Known issues
 
-- **A scene skips lights that already match it, so Layers never hears about them.**
-  Home Assistant sends no command to a scene member that already looks the way the scene
-  wants. Example: a layer holds the ceiling light off, and you run a bedtime scene that
-  also turns it off. Home Assistant skips the ceiling, so Layers doesn't learn that "off"
-  is what you want now. When the layer is cleared later, the light goes back to the old
-  base and turns on. Planned fix: when a scene runs, a managed member that got no command
-  within a few seconds is treated as if the scene had set it to what it already shows.
+None right now.
 
 ## Next
 
