@@ -66,6 +66,7 @@ from .logic.capability import (
     MATCH_YES,
     caps_from_attrs,
     close,
+    follow_command,
     matches,
     observed_from_state,
     observed_to_command,
@@ -74,14 +75,20 @@ from .logic.capability import (
 from .logic.model import (
     CALL_MEMORY_S,
     Caps,
+    Command,
     DEBOUNCE_S,
     DIV_DELIVERY,
     DIV_MANUAL_KEEP,
     DIV_REPAIRED_BY_TARGETED_CALL,
     DIV_UNSYNCED,
+    GROUP_BRIGHTNESS,
+    GROUP_COLOR,
     LATE_WINDOW_DEFAULT_S,
     LATE_WINDOW_S,
     LastCommand,
+    Layer,
+    MODE_FOLLOW,
+    NO_STATE,
     OFF,
     ON,
     Observed,
@@ -99,7 +106,7 @@ from .logic.model import (
     STARTUP_GRACE_S,
     SetRequest,
 )
-from .logic.resolve import resolve
+from .logic.resolve import resolve, resolve_without_follow
 from .render import Renderer, RenderJob
 from . import scenes
 from .store import LayersStore
@@ -116,6 +123,8 @@ BASE_SRC_OBSERVED = "observed"  # base_source when a set on a lamp with no base 
 SAVE_DELAY_S = 2.0              # model changes
 SAVE_LAZY_S = 60.0              # observed-only changes
 SCENE_SETTLE_S = 2.0            # a scene's calls to its members all start well inside this
+FOLLOW_TRANSITION_S = 1.0       # a follow layer's updates, unless it sets its own
+_ATTRS = frozenset({GROUP_BRIGHTNESS, GROUP_COLOR})
 
 # Divergences that only layers.sync repairs: no deferred render pushes them (SPEC 2).
 DIV_SYNC_ONLY = frozenset({DIV_MANUAL_KEEP, DIV_UNSYNCED})
@@ -140,6 +149,33 @@ class _SceneRun:
     wanted: dict[str, State]
     may_control: Callable[[str, str], bool] | None
     reached: set[str] = field(default_factory=set)
+
+
+def _following(rec: Record, now: float) -> list[Layer]:
+    """The lamp's live follow layers, bottom of the stack first."""
+    return sorted((layer for layer in rec.layers.values()
+                   if layer.mode == MODE_FOLLOW and layer.live(now)),
+                  key=lambda layer: (layer.priority, layer.seq))
+
+
+def _chosen(call: cl.CallInfo | None, before: Observed | None, new: Observed | None,
+            follow_up: bool) -> frozenset[str] | None:
+    """The brightness/colour a person chose with a change, for follow layers (SPEC 5.3).
+
+    A follow-up is the tail of a change already judged: nothing more. A call with a
+    known intent: the groups it named (a bare turn_on names none). A lamp that just
+    came on: nothing, it shows its power-on level. Otherwise what moved. ``None``
+    lets the policy take the groups the change took.
+    """
+    if follow_up:
+        return frozenset()
+    if call is not None and call.command is not None:
+        return call.groups & _ATTRS
+    if new is None or new.state != ON:
+        return None
+    if before is None or before.state != ON:
+        return frozenset()
+    return (cl.changed_groups(before, new) or frozenset()) & _ATTRS
 
 
 def _on_off(obs: Observed | None) -> str | None:
@@ -190,6 +226,8 @@ class Engine:
         self._late_retried: set[str] = set()
         self._releases: dict[str, CALLBACK_TYPE] = {}
         self._scenes: dict[str, _SceneRun] = {}          # scene call context id -> run
+        self._sources: frozenset[str] = frozenset()      # entities follow layers follow
+        self._source_unsub: CALLBACK_TYPE | None = None
         self._save_due: float | None = None
         self._setup_before_start = hass.state is not CoreState.running
         self._stopping = False
@@ -218,7 +256,9 @@ class Engine:
             self.records[eid] = rec
             reg_entry = registry.async_get(eid)
             self._platforms[eid] = reg_entry.platform if reg_entry else ""
+            self._read_sources(rec)
         self._take_over_ours()
+        self._track_sources()
         if self.enrolled:
             self._unsubs.append(
                 async_track_state_change_event(self.hass, sorted(self.enrolled), self._on_state)
@@ -261,6 +301,9 @@ class Engine:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
+        if self._source_unsub:
+            self._source_unsub()
+            self._source_unsub = None
         self._cancel_all_timers()
         self._save_due = None
         await self.store.async_save(self._data_to_save())
@@ -301,6 +344,9 @@ class Engine:
         self.in_grace = False
         now = self.now()
         try:
+            for rec in self.records.values():
+                self._read_sources(rec)     # sources that loaded during the grace
+            self._track_sources()
             for eid, rec in list(self.records.items()):
                 try:
                     self._end_grace_lamp(eid, rec, now)
@@ -314,6 +360,7 @@ class Engine:
 
     def _end_grace_lamp(self, eid: str, rec: Record, now: float) -> None:
         caps = self.caps(eid)
+        pol.release_manual(rec, now)    # a take-over that ran out while Home Assistant was down
         shown = rec.observed if rec.available else rec.p_at_drop
         # 1. Layers that expired while Home Assistant was down. An allowed render is
         #    Layers' own decision (SPEC 7.3 c), neither an old debt for decide_return
@@ -359,7 +406,13 @@ class Engine:
         before = rec.p_at_drop
         if before is not None and before.available and not close(shown, before):
             self._decision(rec.entity_id, "startup:external")
-            self._external(rec, cl.Verdict(cl.EXTERNAL, source=SRC_DEVICE), shown, caps, now)
+            self._external(rec, cl.Verdict(cl.EXTERNAL, source=SRC_DEVICE), shown, caps, now,
+                           before=before)
+            return
+        unfollowed = project(resolve_without_follow(rec, now), caps)
+        if unfollowed is not None and matches(shown, unfollowed, caps) == MATCH_YES:
+            # Only the follow values differ: its source moved while Layers was down.
+            self._follow_render(rec, now)
             return
         rec.diverged = DIV_UNSYNCED
 
@@ -613,11 +666,11 @@ class Engine:
                 last.matched_at = now
         if kind == cl.OURS:
             if new is not None and new.state == OFF:
-                pol.lift_on_off(rec)
+                self._seen_off(rec)
             self.save(lazy=True)
             return
         if kind == cl.EXTERNAL:
-            self._external(rec, verdict, new, caps, now, user_id=ctx.user_id)
+            self._external(rec, verdict, new, caps, now, user_id=ctx.user_id, before=old)
             return
         if self._pending("return", eid):
             # The lamp just came back and is still settling: its reports are what the
@@ -684,7 +737,9 @@ class Engine:
 
     def _external(self, rec: Record, verdict: cl.Verdict, new: Observed | None, caps: Caps,
                   now: float, user_id: str | None = None, *, policy: str | None = None,
-                  follow_up: bool = False) -> None:
+                  follow_up: bool = False, before: Observed | None = None) -> None:
+        """``before``: what the lamp showed before the change, for follow layers (what
+        the person chose: a lamp that just came on shows its power-on level)."""
         eid = rec.entity_id
         shown = observed_to_command(new, caps) if new is not None else None
         call = verdict.call
@@ -705,9 +760,10 @@ class Engine:
             return
         policy = policy or self.policy_for(eid)
         result = pol.apply_external(rec, shown, verdict.groups, verdict.source or SRC_DEVICE,
-                                    policy, now, who, caps=caps)
+                                    policy, now, who, caps=caps,
+                                    chosen=_chosen(call, before, new, follow_up))
         if new is not None and new.state == OFF:
-            pol.lift_on_off(rec)
+            self._seen_off(rec)
         self._failed.discard(eid)
         if result.dropped or (result.edited and not follow_up):
             self.hass.bus.async_fire(
@@ -720,6 +776,8 @@ class Engine:
             # the device changed itself, the effective command goes back on it.
             self._decision(eid, "reassert", source=verdict.source)
             self._render(eid, reason="reassert", parent_id=None, deferred=True)
+        else:
+            self._follow_after_external(rec, now)
         self._schedule_ttl()
         self.save()
         self.notify()
@@ -737,7 +795,8 @@ class Engine:
         verdict = cl.settle_debounce(rec, current, self.caps(eid), self.now())
         self._decision(eid, verdict.kind, source=verdict.source, settled=True)
         if verdict.kind == cl.EXTERNAL:
-            self._external(rec, verdict, current, self.caps(eid), self.now())
+            self._external(rec, verdict, current, self.caps(eid), self.now(),
+                           before=rec.observed_prev)
         rec.observed_prev = None
 
     def _flush_debounce(self, eid: str) -> None:
@@ -775,9 +834,10 @@ class Engine:
             return  # it went away again: still owed, the next return decides
         elif kind == cl.EXTERNAL:
             rec.owed = None
-            self._external(rec, cl.Verdict(cl.EXTERNAL, source=SRC_DEVICE), current, caps, now)
+            self._external(rec, cl.Verdict(cl.EXTERNAL, source=SRC_DEVICE), current, caps, now,
+                           before=rec.p_at_drop)
         if current.state == OFF:
-            pol.lift_on_off(rec)
+            self._seen_off(rec)
 
     def _replay(self, rec: Record, shown: Any, groups: Any, source: str, now: float,
                 user_id: str | None) -> None:
@@ -885,7 +945,8 @@ class Engine:
         self._supersede(rec)
         policy = self.policy_for(lamp)
         result = pol.apply_external(rec, shown, verdict.groups, call.source, policy, now,
-                                    call.user_id, caps=caps)
+                                    call.user_id, caps=caps,
+                                    chosen=call.groups & _ATTRS if call.command else frozenset())
         if not rec.available:
             effective = resolve(rec, now).command
             rec.owed = (
@@ -893,7 +954,9 @@ class Engine:
                 if effective is not None else None
             )
         elif rec.observed is not None and rec.observed.state == OFF:
-            pol.lift_on_off(rec)
+            self._seen_off(rec)
+        else:
+            self._follow_after_external(rec, now)
         if result.dropped or result.edited:
             self.hass.bus.async_fire(
                 EVENT_EXTERNAL,
@@ -901,6 +964,105 @@ class Engine:
                  "dropped": list(result.dropped), "edited": result.edited},
             )
         return True
+
+    # ================================================================ follow layers
+
+    def _read_sources(self, rec: Record) -> None:
+        """Give each follow layer on the lamp its source's values now. A source that is
+        away (still loading, unavailable) leaves what the layer had."""
+        for layer in rec.layers.values():
+            if layer.mode != MODE_FOLLOW or not layer.source:
+                continue
+            state = self.hass.states.get(layer.source)
+            if state is not None and state.state not in NO_STATE:
+                layer.command = follow_command(state.state, state.attributes)
+
+    def _track_sources(self) -> None:
+        """Listen to exactly the entities that follow layers follow."""
+        sources = frozenset(
+            layer.source for rec in self.records.values() for layer in rec.layers.values()
+            if layer.mode == MODE_FOLLOW and layer.source
+        )
+        if sources == self._sources and (self._source_unsub is not None or not sources):
+            return
+        if self._source_unsub:
+            self._source_unsub()
+            self._source_unsub = None
+        self._sources = sources
+        if sources and not self._stopping:
+            self._source_unsub = async_track_state_change_event(
+                self.hass, sorted(sources), self._on_source
+            )
+
+    @callback
+    def _on_source(self, event: Event[EventStateChangedData]) -> None:
+        source = event.data["entity_id"]
+        new = event.data["new_state"]
+        if new is None or new.state in NO_STATE:
+            # An integration reloading, a source removed: keep the last values rather
+            # than make every following lamp jump to its base.
+            return
+        command = follow_command(new.state, new.attributes)
+        now = self.now()
+        changed = False
+        for eid, rec in list(self.records.items()):
+            try:
+                changed |= self._source_changed(rec, source, command, now)
+            except Exception:  # noqa: BLE001 — one lamp must not stop the others
+                _LOGGER.exception("layers: could not follow %s on %s", source, eid)
+                self._mark_untrusted(eid)
+        if changed:
+            self.save(lazy=True)
+            self.notify()
+
+    def _source_changed(self, rec: Record, source: str, command: Command, now: float) -> bool:
+        layers = [layer for layer in rec.layers.values()
+                  if layer.mode == MODE_FOLLOW and layer.source == source]
+        if not layers or all(layer.command == command for layer in layers):
+            return False
+        before = resolve(rec, now).command
+        for layer in layers:
+            layer.command = command
+        if resolve(rec, now).command != before:
+            self._follow_render(rec, now)     # SPEC 7.3 h
+        return True
+
+    def _follow_after_external(self, rec: Record, now: float) -> None:
+        """SPEC 7.3 i: after a change Layers did not make, a lamp that is on and has a
+        follow layer gets the values that layer gives it (a lamp switched on by hand
+        comes on at its power-on level). Never turns a lamp on or off: its on/off is
+        what the person just did."""
+        obs = rec.observed
+        if obs is None or obs.state != ON or not _following(rec, now):
+            return
+        effective = resolve(rec, now).command
+        if effective is None or not effective.is_on:
+            return
+        caps = self.caps(rec.entity_id)
+        call = project(effective, caps)
+        if call is None or matches(obs, call, caps) == MATCH_YES:
+            return
+        self._decision(rec.entity_id, "follow_on")
+        self._follow_render(rec, now)
+
+    def _follow_render(self, rec: Record, now: float) -> None:
+        """Send a lamp its follow values (SPEC 7.3 h and i): never during the startup
+        grace and never to a lamp that is away (nothing is owed: the next update or
+        its return brings them)."""
+        eid = rec.entity_id
+        if self.in_grace or not rec.available:
+            return
+        self._flush_debounce(eid)       # a person's pending change is judged first
+        layers = _following(rec, now)
+        transition = next((layer.transition for layer in layers if layer.transition is not None),
+                          FOLLOW_TRANSITION_S)
+        self._render(eid, reason="follow", parent_id=None, transition=transition, deferred=True)
+
+    def _seen_off(self, rec: Record) -> None:
+        """The lamp is off: tombstones that lift when off lift, and follow layers follow
+        again whatever a person took over."""
+        pol.lift_on_off(rec)
+        pol.release_manual(rec, self.now(), off=True)
 
     # ================================================================ scenes
 
@@ -1115,6 +1277,9 @@ class Engine:
     def _has_expired(rec: Record, now: float) -> bool:
         return any(not layer.live(now) for layer in rec.layers.values()) or any(
             not t.live(now) for t in rec.tombstones.values()
+        ) or any(
+            layer.manual_until is not None and layer.manual_until <= now
+            for layer in rec.layers.values()
         )
 
     def _schedule_ttl(self) -> None:
@@ -1126,6 +1291,7 @@ class Engine:
         times = [
             t for rec in self.records.values() if not rec.untrusted
             for t in [*(l.expires_at for l in rec.layers.values()),
+                      *(layer.manual_until for layer in rec.layers.values()),
                       *(s.expires_at for s in rec.tombstones.values())]
             if t is not None
         ]
@@ -1148,6 +1314,7 @@ class Engine:
                     _LOGGER.exception("layers: could not expire layers on %s", eid)
                     self._mark_untrusted(eid)
         finally:
+            self._track_sources()
             self._schedule_ttl()
             self.save()
             self.notify()
@@ -1157,9 +1324,16 @@ class Engine:
         caps = self.caps(eid)
         shown = rec.observed if rec.available else rec.p_at_drop
         result = pol.expire(rec, now, shown, caps)
-        self._decision(eid, "expiry", expired=list(result.expired), render=result.render)
+        if result.expired or result.lifted:
+            self._decision(eid, "expiry", expired=list(result.expired), render=result.render)
+        before = resolve(rec, now).command
+        released = pol.release_manual(rec, now)
+        if released:
+            self._decision(eid, "follow_again", layers=list(released))
         if result.render:
             self._render(eid, reason="expiry", parent_id=None, deferred=True)
+        elif released and resolve(rec, now).command != before:
+            self._follow_render(rec, now)
         else:
             self._drop_stale_render(eid)
 
@@ -1204,12 +1378,14 @@ class Engine:
             if outcome.result.startswith("skipped"):
                 results[eid] = outcome.result
                 continue
+            self._read_sources(rec)
             after = resolve(rec, now).command
             if after != before or self._repair_needed(rec):
                 results[eid] = self._render(eid, reason="set", parent_id=parent_id,
                                             transition=transition)
             else:
                 results[eid] = RESULT_UNCHANGED
+        self._track_sources()
         self._schedule_ttl()
         self.save()
         self.notify()
@@ -1235,6 +1411,7 @@ class Engine:
                                             transition=transition)
             else:
                 results[eid] = RESULT_UNCHANGED
+        self._track_sources()
         self._schedule_ttl()
         self.save()
         self.notify()
@@ -1274,7 +1451,9 @@ class Engine:
                     {**l.to_json(),
                      "set_at": dt_util.utc_from_timestamp(l.set_at).isoformat(),
                      "expires_at": dt_util.utc_from_timestamp(l.expires_at).isoformat()
-                     if l.expires_at else None}
+                     if l.expires_at else None,
+                     "manual_until": dt_util.utc_from_timestamp(l.manual_until).isoformat()
+                     if l.manual_until else None}
                     for l in layers
                 ],
                 "tombstones": sorted(rec.tombstones),

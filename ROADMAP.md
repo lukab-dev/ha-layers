@@ -9,18 +9,6 @@ None right now.
 
 ## Next
 
-- **A `follow` layer for Adaptive Lighting and circadian lighting.** Today Adaptive
-  Lighting can't control managed lights directly (Layers reads every change it didn't make
-  as "someone changed the light"), and feeding its values into an `adjust` layer breaks
-  when someone switches a light on by hand. The plan:
-  - `layers.set mode: follow, source: <entity>`: the layer follows the brightness and
-    colour attributes of an entity, such as Adaptive Lighting's switch or a template
-    sensor. Layers does no circadian maths itself.
-  - It never turns a light on. Switching a light on or off by hand doesn't remove it.
-  - A hand change takes over only what it changed: dim a light by hand and its brightness
-    stops following, but its colour keeps adapting. Control comes back when the light goes
-    off, or after an optional timeout.
-  - A light switched on by hand gets the follow values right away.
 - **Protected layers.** Two levels:
   - `protected: automations`: only the owner's `clear` or a person removes it. Other
     automations, scenes and `clear all` don't.

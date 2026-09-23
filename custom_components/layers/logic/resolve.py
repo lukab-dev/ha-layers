@@ -15,14 +15,20 @@ Fold, bottom to top (SPEC section 3):
 - an ``adjust`` layer replaces brightness and colour, where given, and only
   while the fold is on. Over an off or unknown result it does nothing and is
   not active;
+- a ``follow`` layer is an ``adjust`` layer whose values come from another
+  entity, except for the groups a person took over (``manual``). It is active
+  only when it replaced something;
 - colour is one atomic group: a layer's colour replaces the one below whole.
 """
 
 from __future__ import annotations
 
 from .model import (
+    GROUP_BRIGHTNESS,
+    GROUP_COLOR,
     LAYER_BASE,
     MODE_ADJUST,
+    MODE_FOLLOW,
     MODE_SET,
     OFF,
     OFF_COMMAND,
@@ -47,7 +53,7 @@ def live_layers(rec: Record, now: float) -> list[Layer]:
     return sorted((layer for layer in rec.layers.values() if layer.live(now)), key=_stack_key)
 
 
-def _fold(rec: Record, now: float) -> tuple[Command | None, Layer | None]:
+def _fold(rec: Record, now: float, *, skip_follow: bool = False) -> tuple[Command | None, Layer | None]:
     """The effective command and the layer that decided it (None: the base, or nothing)."""
     base = rec.base
     state: str | None = base.state if base else None
@@ -56,6 +62,8 @@ def _fold(rec: Record, now: float) -> tuple[Command | None, Layer | None]:
     top: Layer | None = None
 
     for layer in live_layers(rec, now):
+        if skip_follow and layer.mode == MODE_FOLLOW:
+            continue
         cmd = layer.command
         if layer.mode == MODE_SET:
             if cmd.state == OFF:
@@ -73,7 +81,18 @@ def _fold(rec: Record, now: float) -> tuple[Command | None, Layer | None]:
             if cmd.color is not None:
                 color = cmd.color
             top = layer
-        # An adjust over an off/unknown result, or a layer with an unknown mode, does nothing.
+        elif layer.mode == MODE_FOLLOW and state == ON:
+            replaced = False
+            if cmd.brightness is not None and GROUP_BRIGHTNESS not in layer.manual:
+                brightness = cmd.brightness
+                replaced = True
+            if cmd.color is not None and GROUP_COLOR not in layer.manual:
+                color = cmd.color
+                replaced = True
+            if replaced:
+                top = layer
+        # An adjust or follow layer over an off/unknown result, or a layer with an
+        # unknown mode, does nothing.
 
     if state is None:
         return None, top
@@ -99,6 +118,21 @@ def resolve(rec: Record, now: float) -> Resolution:
 def active_layer(rec: Record, now: float) -> Layer | None:
     """The layer ``resolve()`` names as active, or ``None`` when the base (or nothing) decides."""
     return _fold(rec, now)[1]
+
+
+def resolve_without_follow(rec: Record, now: float) -> Command | None:
+    """The effective command as if the lamp had no follow layers (the startup check
+    whether a layered lamp differs only in what its follow layers give it)."""
+    return _fold(rec, now, skip_follow=True)[0]
+
+
+def editable_layer(rec: Record, now: float) -> Layer | None:
+    """The layer ``active_layer()`` would name without the follow layers.
+
+    A follow layer's values come from its source, so an edit (``layer: active``,
+    the ``edit_active`` policy) or a reassert never lands on one.
+    """
+    return _fold(rec, now, skip_follow=True)[1]
 
 
 def state_holder(rec: Record, now: float) -> Layer | None:

@@ -47,6 +47,7 @@ from .model import (
     Layer,
     MODES,
     MODE_ADJUST,
+    MODE_FOLLOW,
     MODE_SET,
     OFF,
     OFF_COMMAND,
@@ -65,7 +66,7 @@ from .model import (
     Tombstone,
     merge_command,
 )
-from .resolve import active_layer, live_layers, resolve, state_holder
+from .resolve import active_layer, editable_layer, live_layers, resolve, state_holder
 
 # SetResult.result
 SET_CREATED = "created"
@@ -244,8 +245,12 @@ def _partial(rec: Record, groups: frozenset[str] | None, now: float, caps: Caps 
 
 
 def _drop_all(rec: Record, source: str, now: float) -> tuple[str, ...]:
-    """Drop every layer on the lamp and tombstone each one (take_back)."""
-    dropped = sorted(rec.layers.values(), key=_stack_key)
+    """Drop every layer on the lamp but its follow layers, and tombstone each one (take_back).
+
+    A follow layer is never dropped by a change Layers did not make: the change
+    takes over only the groups it chose (``_take_over``).
+    """
+    dropped = sorted((lay for lay in rec.layers.values() if lay.mode != MODE_FOLLOW), key=_stack_key)
     for layer in dropped:
         rec.tombstones[layer.id] = Tombstone(
             layer_id=layer.id,
@@ -254,8 +259,23 @@ def _drop_all(rec: Record, source: str, now: float) -> tuple[str, ...]:
             lift_when_off=layer.resume_after_manual,
             source=source,
         )
-    rec.layers.clear()
+    for layer in dropped:
+        del rec.layers[layer.id]
     return tuple(layer.id for layer in dropped)
+
+
+def _take_over(rec: Record, chosen: frozenset[str], now: float) -> None:
+    """A person chose ``chosen`` (brightness and/or colour): each follow layer stops
+    following those until the lamp is seen off, or its ``manual_timeout`` runs out."""
+    chosen = chosen & _ATTR_GROUPS
+    if not chosen:
+        return
+    for layer in rec.layers.values():
+        if layer.mode != MODE_FOLLOW or not layer.live(now):
+            continue
+        layer.manual = layer.manual | chosen
+        if layer.manual_timeout is not None:
+            layer.manual_until = now + layer.manual_timeout
 
 
 def _renew(layer: Layer, req: SetRequest, *, keep_lease: bool = False) -> None:
@@ -331,7 +351,9 @@ def apply_set(
     ``now``, a reserved id or an unknown mode. Every result but ``refreshed``
     and ``skipped_*`` sets ``last_layers_change``.
     """
-    if not req.command.groups():
+    if req.mode == MODE_FOLLOW:
+        _check_follow(rec, req)
+    elif not req.command.groups() and not _renews_follow(rec, req, now):
         raise PolicyError(
             ERR_INVALID_REQUEST,
             entity_id=rec.entity_id,
@@ -362,7 +384,7 @@ def _set_base_layer(rec: Record, req: SetRequest, now: float) -> SetResult:
 
 
 def _set_active_layer(rec: Record, req: SetRequest, now: float) -> SetResult:
-    top = active_layer(rec, now)
+    top = editable_layer(rec, now)
     if top is None:
         return _set_base_layer(rec, req, now)
     if top.mode == MODE_ADJUST:
@@ -374,6 +396,42 @@ def _set_active_layer(rec: Record, req: SetRequest, now: float) -> SetResult:
         top.command = merge_command(top.command, req.command)
     rec.last_layers_change = now
     return SetResult(SET_ACTIVE, top.id)
+
+
+def _check_follow(rec: Record, req: SetRequest) -> None:
+    """A follow request names a source and nothing a source would give."""
+    reason = None
+    if req.layer in (LAYER_BASE, LAYER_ACTIVE):
+        reason = "a follow layer needs a layer id"
+    elif not req.source:
+        # A renewal may leave the source out: it keeps the one the layer follows.
+        layer = rec.layers.get(req.layer)
+        if not req.only_if_present:
+            reason = "a follow layer needs a source"
+        elif layer is not None and _requested_mode(layer) != MODE_FOLLOW:
+            reason = "a renewal cannot turn a layer into a follow layer"
+    elif req.source == rec.entity_id:
+        reason = "a lamp cannot follow itself"
+    elif req.command.groups():
+        reason = "a follow layer takes its state, brightness and colour from its source"
+    if reason is not None:
+        raise PolicyError(ERR_INVALID_REQUEST, entity_id=rec.entity_id, layer=req.layer,
+                          reason=reason)
+
+
+def _renews_follow(rec: Record, req: SetRequest, now: float) -> bool:
+    """A renewal (``only_if_present``) of a follow layer carries no command."""
+    layer = rec.layers.get(req.layer)
+    return (req.only_if_present and layer is not None and layer.live(now)
+            and _requested_mode(layer) == MODE_FOLLOW)
+
+
+def _follow_options(layer: Layer, req: SetRequest) -> None:
+    """A follow request's own options; one a request leaves out keeps its value."""
+    if req.manual_timeout is not None:
+        layer.manual_timeout = req.manual_timeout
+    if req.transition is not None:
+        layer.transition = req.transition
 
 
 def _set_named_layer(
@@ -419,9 +477,15 @@ def _set_named_layer(
             owner=req.owner,
             resume_after_manual=req.resume_after_manual,
             on_expire=req.on_expire,
+            source=req.source if req.mode == MODE_FOLLOW else None,
+            manual_timeout=req.manual_timeout if req.mode == MODE_FOLLOW else None,
+            transition=req.transition if req.mode == MODE_FOLLOW else None,
         )
         rec.last_layers_change = now
         return SetResult(SET_CREATED, layer_id)
+
+    if _requested_mode(layer) == MODE_FOLLOW and (req.only_if_present or req.mode == MODE_FOLLOW):
+        return _set_follow_layer(rec, layer, req, now)
 
     asked = _requested_mode(layer)
     # A renewal (only_if_present) never changes a layer's mode: it must not turn an
@@ -442,9 +506,45 @@ def _set_named_layer(
     layer.requested = command
     layer.command = command
     layer.set_at = now
+    if mode == MODE_FOLLOW:     # a set/adjust layer becomes a follow layer
+        layer.source = req.source
+        layer.manual_timeout = req.manual_timeout
+        layer.transition = req.transition
+    else:
+        layer.source = layer.manual_timeout = layer.transition = None
+    layer.manual = frozenset()
+    layer.manual_until = None
     _update_options(layer, req)
     rec.last_layers_change = now
     return SetResult(SET_UPDATED, layer_id)
+
+
+def _set_follow_layer(rec: Record, layer: Layer, req: SetRequest, now: float) -> SetResult:
+    """A set of an existing follow layer: the same source (or a renewal) only refreshes.
+
+    Its command is the engine's copy of the source, so no request compares
+    against it. A new source or priority is an update: what a person took over
+    from the old source does not carry over.
+    """
+    new_priority = req.priority is not None and req.priority != layer.priority
+    new_source = not req.only_if_present and req.source != layer.source
+    if not new_priority and not new_source:
+        _renew(layer, req, keep_lease=True)
+        _follow_options(layer, req)
+        return SetResult(SET_REFRESHED, layer.id)
+    if new_priority:
+        _check_priority(rec, req.priority, layer.id, now)
+        layer.priority = req.priority
+    if new_source:
+        layer.source = req.source
+        layer.command = Command(None)
+    layer.manual = frozenset()
+    layer.manual_until = None
+    layer.set_at = now
+    _update_options(layer, req)
+    _follow_options(layer, req)
+    rec.last_layers_change = now
+    return SetResult(SET_UPDATED, layer.id)
 
 
 # --------------------------------------------------------------------------- #
@@ -515,6 +615,7 @@ def apply_external(
     user_id: str | None = None,
     *,
     caps: Caps | None = None,
+    chosen: frozenset[str] | None = None,
 ) -> ExternalResult:
     """Record a change Layers did not make, under the lamp's policy (SPEC 5.3).
 
@@ -547,6 +648,12 @@ def apply_external(
       ``REASSERT_COOLDOWN_S`` of a reassert is a ``take_back``.
     - ``replay`` (``POLICY_REPLAY``): see ``apply_replay``.
 
+    Follow layers are never dropped or edited. Under every policy but a
+    reassert, each one stops following the brightness/colour the person
+    ``chosen`` (default: the attribute groups the change took); the caller
+    passes what was really chosen: a known call's named groups, nothing for a
+    lamp that just came on at its power-on level.
+
     Every policy but ``replay`` clears ``owed``; all record ``last_external``.
     None of them touches ``last_layers_change``, which marks changes made
     through Layers.
@@ -564,12 +671,16 @@ def apply_external(
         last = rec.last_external
         recent = (last is not None and last.policy == POLICY_REASSERT
                   and now - last.at < REASSERT_COOLDOWN_S)
-        if source == SRC_DEVICE and active_layer(rec, now) is not None and not recent:
+        if source == SRC_DEVICE and editable_layer(rec, now) is not None and not recent:
             reassert = True
         else:
             policy = POLICY_TAKE_BACK
 
-    top = active_layer(rec, now) if policy == POLICY_EDIT_ACTIVE else None
+    if not reassert:
+        taken = shown.groups() if groups is None else shown.groups() & groups
+        _take_over(rec, taken if chosen is None else chosen, now)
+
+    top = editable_layer(rec, now) if policy == POLICY_EDIT_ACTIVE else None
     if reassert:
         rec.diverged = DIV_DELIVERY
     elif top is not None:
@@ -587,7 +698,7 @@ def apply_external(
     elif policy == POLICY_BASE_KEEP_LAYERS:
         _set_base(rec, merge_command(rec.base, shown, groups), source, now)
         kept_on_show = (
-            active_layer(rec, now) is not None
+            editable_layer(rec, now) is not None
             and _shows(rec, resolve(rec, now).command, caps) is False
         )
         if kept_on_show:
@@ -705,6 +816,21 @@ def lift_on_off(rec: Record) -> tuple[str, ...]:
     for layer_id in lifted:
         del rec.tombstones[layer_id]
     return lifted
+
+
+def release_manual(rec: Record, now: float, *, off: bool = False) -> tuple[str, ...]:
+    """Follow layers follow again what a person took over: all of them when the lamp
+    is seen off (``off``), else those whose ``manual_until`` has passed. Returns
+    the ids of the layers that changed."""
+    released = []
+    for layer in sorted(rec.layers.values(), key=_stack_key):
+        if layer.mode != MODE_FOLLOW or not layer.manual:
+            continue
+        if off or (layer.manual_until is not None and layer.manual_until <= now):
+            layer.manual = frozenset()
+            layer.manual_until = None
+            released.append(layer.id)
+    return tuple(released)
 
 
 def record_observed_as_base(

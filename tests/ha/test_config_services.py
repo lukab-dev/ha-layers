@@ -1005,7 +1005,9 @@ async def test_sync_pushes_what_observe_only_left_unsynced(
 LAMP_KEYS = {"active", "effective", "base", "layers", "tombstones", "observed", "available",
              "diverged", "pending", "rendering", "untrusted", "policy", "last_external"}
 LAYER_KEYS = {"id", "priority", "mode", "requested", "command", "seq", "set_at", "expires_at",
-              "owner", "resume_after_manual", "on_expire", "requested_mode"}
+              "owner", "resume_after_manual", "on_expire", "requested_mode",
+              # follow layers (None / empty on the others)
+              "source", "manual", "manual_until", "manual_timeout", "transition"}
 
 
 async def test_get_describes_each_lamp(
