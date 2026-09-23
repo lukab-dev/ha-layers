@@ -26,12 +26,20 @@ jobs:
       - run: python -m pytest tests/logic -q
 
   home-assistant:
-    name: integration (Home Assistant)
+    name: integration (Home Assistant ${{ matrix.ha }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - ha: tested
+            requirement: "-r requirements_test.txt"
+          # The oldest release hacs.json allows. 2026.6 and older fail 11 of these tests.
+          - ha: "2026.7.0"
+            requirement: "pytest-homeassistant-custom-component==0.13.344"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install -r requirements_test.txt
+      - run: pip install ${{ matrix.requirement }}
       - run: python -m pytest tests/ha -q --timeout=120
