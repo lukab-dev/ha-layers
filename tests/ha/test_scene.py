@@ -199,3 +199,21 @@ async def test_an_admin_scene_is_the_persons(
     rec = engine.records["light.lamp_a"]
     assert not rec.layers and rec.base.state == "off"
     assert rec.base_source == "user"
+
+
+def test_the_reproduce_tables_mirror_home_assistants() -> None:
+    """scenes.py mirrors light reproduce_state's tables (their shape changed between
+    releases, so they are not imported). Where this release has them as pairs, the
+    names must match ours; plain names must be ours as they are."""
+    from homeassistant.components.light import reproduce_state as ha
+
+    from custom_components.layers import scenes
+
+    def names(table: Any) -> tuple[str, ...]:
+        return tuple(str(item[0] if isinstance(item, tuple) else item) for item in table)
+
+    assert names(ha.ATTR_GROUP) == scenes._ATTR_GROUP                   # noqa: SLF001
+    assert set(names(ha.COLOR_GROUP)) == set(scenes._COLOR_GROUP)       # noqa: SLF001
+    for mode, entry in ha.COLOR_MODE_TO_ATTRIBUTE.items():
+        parameter, attribute = scenes._BY_COLOR_MODE[str(mode)]         # noqa: SLF001
+        assert (entry.parameter, str(entry.state_attr)) == (parameter, attribute)

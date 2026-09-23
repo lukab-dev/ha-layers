@@ -23,12 +23,6 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.components.light import ColorMode
-from homeassistant.components.light.reproduce_state import (
-    ATTR_GROUP,
-    COLOR_GROUP,
-    COLOR_MODE_TO_ATTRIBUTE,
-)
 from homeassistant.const import ATTR_ENTITY_ID, ENTITY_MATCH_ALL, STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import config_validation as cv
@@ -38,6 +32,24 @@ SCENE_DOMAIN = "scene"
 SCENE_SERVICES = frozenset({"turn_on", "apply"})
 ATTR_COLOR_MODE = "color_mode"
 CONF_ENTITIES = "entities"
+
+# What light reproduce_state sends for a state, mirrored here: the shape of its own
+# tables changed between Home Assistant releases (plain names in 2026.7, pairs later),
+# while the names themselves did not. A service parameter has its state attribute's name
+# except in white mode, which sends ``white`` at the state's brightness.
+_ATTR_GROUP = ("brightness", "effect")
+_COLOR_GROUP = ("hs_color", "color_temp_kelvin", "rgb_color", "rgbw_color", "rgbww_color",
+                "xy_color")
+_BY_COLOR_MODE = {                   # color_mode -> (service parameter, state attribute)
+    "color_temp": ("color_temp_kelvin", "color_temp_kelvin"),
+    "hs": ("hs_color", "hs_color"),
+    "rgb": ("rgb_color", "rgb_color"),
+    "rgbw": ("rgbw_color", "rgbw_color"),
+    "rgbww": ("rgbww_color", "rgbww_color"),
+    "white": ("white", "brightness"),
+    "xy": ("xy_color", "xy_color"),
+}
+_UNKNOWN_MODE = "unknown"
 
 
 def scene_targets(
@@ -69,19 +81,20 @@ def reproduced_call(state: State) -> tuple[str, dict[str, Any]] | None:
         return "turn_on", {}
     data: dict[str, Any] = {}
     attrs = state.attributes
-    for attribute, parameter in ATTR_GROUP:
+    for attribute in _ATTR_GROUP:
         if (value := attrs.get(attribute)) is not None:
-            data[parameter] = value
-    mode = attrs.get(ATTR_COLOR_MODE, ColorMode.UNKNOWN)
-    if mode != ColorMode.UNKNOWN:
-        if (by_mode := COLOR_MODE_TO_ATTRIBUTE.get(mode)) is not None:
-            if (value := attrs.get(by_mode.state_attr)) is None:
+            data[attribute] = value
+    mode = attrs.get(ATTR_COLOR_MODE, _UNKNOWN_MODE)
+    if mode != _UNKNOWN_MODE:
+        if (by_mode := _BY_COLOR_MODE.get(str(mode))) is not None:
+            parameter, attribute = by_mode
+            if (value := attrs.get(attribute)) is None:
                 return None
-            data[by_mode.parameter] = value
+            data[parameter] = value
     else:
-        for attribute, parameter in COLOR_GROUP:
+        for attribute in _COLOR_GROUP:
             if (value := attrs.get(attribute)) is not None:
-                data[parameter] = value
+                data[attribute] = value
                 break
     return "turn_on", data
 
