@@ -272,7 +272,9 @@ and never while **Apply** is off. A light nobody layers is never commanded.
 - Colours are sent exactly as you write them: `xy_color` stays xy, because some lamps
   wash out hs or rgb colours.
 - The idea comes from building automation, where BACnet has used priority arrays since
-  1995.
+  1995, and from [ha-priority](https://github.com/triosniolin/ha-priority), which brought
+  them to Home Assistant first. Layers takes its model (levels hold live commands, not
+  snapshots) and uses its own actions instead of hooking HA's.
 
 </details>
 
