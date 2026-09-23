@@ -151,6 +151,85 @@ data: {layer: tv, transition: 3}    # without a target: wherever the layer is
 `queued`, `unchanged`, `in_sync`, `pending`, `shadow`, `skipped_tombstoned`,
 `skipped_absent` or `skipped_not_enrolled`.
 
+## Example: a film, with a notification on top
+
+Two automations that know nothing about each other borrow the same lamp. The TV one
+darkens the room while something plays. The notification one turns the sofa lamp orange
+when the washer finishes, until someone says it's emptied.
+
+```yaml
+- alias: "TV: dim the room while playing"
+  triggers:
+    - trigger: template
+      value_template: "{{ is_state('media_player.living_room_tv', 'playing') }}"
+      for: "00:00:15"
+      id: play
+    - trigger: template
+      value_template: "{{ not is_state('media_player.living_room_tv', 'playing') }}"
+      for: "00:02:00"
+      id: stop
+  actions:
+    - choose:
+        - conditions: [{condition: trigger, id: play}]
+          sequence:
+            - action: layers.set
+              target: {entity_id: [light.floor_lamp, light.sofa_lamp]}
+              data: {layer: tv, priority: 40, state: "off", transition: 10,
+                     ttl: "06:00:00", owner: tv_dim}
+            - action: layers.set    # dim the dining lamp only if it is already on
+              target: {entity_id: light.dining_pendant}
+              data: {layer: tv, priority: 40, mode: adjust, brightness_pct: 25,
+                     transition: 10, ttl: "06:00:00", owner: tv_dim}
+        - conditions: [{condition: trigger, id: stop}]
+          sequence:
+            - action: layers.clear
+              data: {layer: tv, transition: 3}
+
+- alias: "Washer done: sofa lamp orange"
+  triggers:
+    - trigger: state
+      entity_id: sensor.washer_status
+      to: finished
+  actions:
+    - action: layers.set
+      target: {entity_id: light.sofa_lamp}
+      data: {layer: washer, priority: 70, state: "on", xy_color: [0.679, 0.318],
+             brightness_pct: 100, ttl: "04:00:00", owner: washer_done}
+
+- alias: "Washer emptied: give the lamp back"
+  triggers:
+    - trigger: state
+      entity_id: input_button.washer_emptied
+  actions:
+    - action: layers.clear
+      target: {entity_id: light.sofa_lamp}
+      data: {layer: washer, transition: 2}
+```
+
+What the sofa lamp shows through an evening:
+
+| Time | What happens | Sofa lamp | Why |
+|---|---|---|---|
+| 20:00 | someone switches it on at 60 % | on, 60 % | that becomes its base |
+| 20:30 | the film starts | off | `tv` (40) is on top |
+| 21:10 | the washer finishes | orange | `washer` (70) is above `tv`; the rest of the room stays dark |
+| 21:15 | someone presses *emptied* | off | clearing `washer` falls through to `tv`, not back to 60 % |
+| 22:30 | the film ends | on, 60 % | clearing `tv` falls through to the base |
+
+Neither automation stores anything or restores anything. If the film had ended while the
+lamp was still orange, it would have stayed orange, and gone to 60 % on *emptied*. If
+someone switches the sofa lamp on by hand mid-film, that lamp keeps their setting and both
+layers are dropped on it (`take_back`). The other lamps stay dark until the film ends.
+
+### The TV automation as a blueprint
+
+[![Import the blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Flukab-dev%2Fha-layers%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Flayers%2Fmedia_dim.yaml)
+
+[`blueprints/automation/layers/media_dim.yaml`](blueprints/automation/layers/media_dim.yaml)
+is the first automation above, with the media player, the lights, the level and the
+delays as inputs. It also clears the layer when Home Assistant starts and the film ended
+while it was down. The lights have to be enrolled in Layers first.
+
 ## Entities
 
 - **`switch.layers_apply`**: off means observe only. Layers are still set and changes

@@ -1,0 +1,181 @@
+blueprint:
+  name: "Layers: dim the room while something plays"
+  description: >-
+    While a media player plays, a Layers layer holds some lights off and dims others
+    that are already on. When playback stops, the layer is cleared and every light
+    falls back to whatever it should show **now**: its current setting, or a layer
+    another automation has put on it meanwhile. Nothing is snapshotted or restored.
+
+
+    A light someone changes mid-film keeps their setting and is left alone when the
+    film ends. The lights must be enrolled in the Layers integration.
+  domain: automation
+  source_url: https://github.com/lukab-dev/ha-layers/blob/main/blueprints/automation/layers/media_dim.yaml
+  homeassistant:
+    min_version: "2026.7.0"
+  input:
+    player:
+      name: Media player
+      selector:
+        entity:
+          domain: media_player
+    lights_off:
+      name: Lights to turn off
+      description: Held off while playing.
+      default: []
+      selector:
+        entity:
+          domain: [light, switch]
+          multiple: true
+    lights_dim:
+      name: Lights to dim
+      description: >-
+        Dimmed while playing, but only if they are on. A light that is off stays off.
+      default: []
+      selector:
+        entity:
+          domain: light
+          multiple: true
+    brightness:
+      name: Dim to
+      default: 25
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    start_delay:
+      name: Playing for
+      description: How long playback must run before the lights change.
+      default: {seconds: 15}
+      selector:
+        duration: {}
+    stop_delay:
+      name: Stopped for
+      description: How long playback must be stopped before the lights come back.
+      default: {minutes: 2}
+      selector:
+        duration: {}
+    layer:
+      name: Layer id
+      description: Use a different id for each copy of this automation.
+      default: tv
+      selector:
+        text: {}
+    priority:
+      name: Priority
+      description: >-
+        1–99, higher wins. Keep notifications that should show over the film above this.
+      default: 40
+      selector:
+        number:
+          min: 1
+          max: 99
+          mode: box
+    fade_in:
+      name: Fade into the film
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: s
+    fade_out:
+      name: Fade back
+      default: 3
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: s
+    max_length:
+      name: Longest film
+      description: >-
+        A backstop. If the stop is ever missed, the layer lapses after this long. It may
+        then only turn lights off or dim them, never light a room.
+      default: {hours: 6}
+      selector:
+        duration: {}
+
+mode: restart
+
+trigger_variables:
+  player: !input player
+
+triggers:
+  - trigger: template
+    value_template: "{{ is_state(player, 'playing') }}"
+    for: !input start_delay
+    id: play
+  - trigger: template
+    value_template: "{{ not is_state(player, 'playing') }}"
+    for: !input stop_delay
+    id: stop
+  - trigger: homeassistant
+    event: start
+    id: start
+
+variables:
+  lights_off: !input lights_off
+  lights_dim: !input lights_dim
+  layer: !input layer
+  max_length: !input max_length
+  ttl: >-
+    {{ '%02d:%02d:%02d' % (max_length.get('hours', 0) | int,
+                           max_length.get('minutes', 0) | int,
+                           max_length.get('seconds', 0) | int) }}
+
+actions:
+  - choose:
+      - alias: Playing - put the layer on (again, it only renews the lease)
+        conditions:
+          - condition: trigger
+            id: play
+        sequence:
+          - if: "{{ lights_off | length > 0 }}"
+            then:
+              - action: layers.set
+                target:
+                  entity_id: "{{ lights_off }}"
+                data:
+                  layer: "{{ layer }}"
+                  priority: !input priority
+                  state: "off"
+                  transition: !input fade_in
+                  ttl: "{{ ttl }}"
+                  owner: "{{ this.entity_id }}"
+          - if: "{{ lights_dim | length > 0 }}"
+            then:
+              - action: layers.set
+                target:
+                  entity_id: "{{ lights_dim }}"
+                data:
+                  layer: "{{ layer }}"
+                  priority: !input priority
+                  mode: adjust
+                  brightness_pct: !input brightness
+                  transition: !input fade_in
+                  ttl: "{{ ttl }}"
+                  owner: "{{ this.entity_id }}"
+      - alias: Stopped - clear the layer, every light falls back to what is below it now
+        conditions:
+          - condition: trigger
+            id: stop
+        sequence:
+          - action: layers.clear
+            data:
+              layer: "{{ layer }}"
+              transition: !input fade_out
+      - alias: Home Assistant started - the layer is stored; clear it if the film ended meanwhile
+        conditions:
+          - condition: trigger
+            id: start
+        sequence:
+          - wait_template: "{{ states(player) not in ['unknown', 'unavailable'] }}"
+            timeout: "00:10:00"
+          - if: "{{ not is_state(player, 'playing') }}"
+            then:
+              - action: layers.clear
+                data:
+                  layer: "{{ layer }}"
+                  transition: !input fade_out
