@@ -1,161 +1,94 @@
 # Layers
 
-Priority layers for Home Assistant lights. An automation *borrows* a lamp by putting a
-layer on it, and gives it back by clearing the layer. The lamp then shows whatever is
-below that layer **now**, not a snapshot taken earlier.
+**Let automations borrow a light and give it back, without snapshots.**
 
-- **No snapshots, so nothing goes stale.** Layers hold live commands. Clearing one falls
-  through to the current state of the layer below.
-- **Survives restarts.** Layers are stored, and time limits are absolute times.
-- **Never fights a person.** When something other than Layers changes a lamp, a per-lamp
-  policy decides what that means. By default the change becomes the lamp's new base, and
-  the layers above it are dropped on that lamp only.
-- **Checks that commands arrived.** Home Assistant silently skips unavailable lamps, and
-  vendor bridges sometimes acknowledge a command and then revert it. Layers reads each lamp
-  back after commanding it, retries with backoff, and owes the command to a lamp that is
-  offline until it returns.
-- **Opt-in and small.** It only touches the lamps you enrol, and only through its own
-  services. It does not intercept Home Assistant's light services, and it uses only
-  documented APIs.
-- **Switches too.** A `switch.*` entity (a relay behind a light, a smart plug) can be
-  enrolled like a lamp. It is a lamp that only does on/off: brightness and colour in a
-  layer are projected away for it, and a layer holding it off is verified, survives a
-  restart, and is delivered again when the device comes back on by itself.
+You're watching a film, so an automation turns the sofa lamp off. Halfway through, the
+washer finishes and another automation turns the same lamp orange to tell you. You empty
+the washer. What should the lamp do now?
 
-## Why
+It should go back to **off**, because the film is still on. When the film ends, it
+should go back to **how you had it before**.
 
-The usual way to borrow a lamp is `scene.create` → change it → `scene.turn_on` later.
-That breaks in every way it can:
+Home Assistant doesn't do that on its own. The usual trick is to save a scene, change
+the lights, then restore the scene later. That breaks easily: the saved scene is gone
+after a restart, the restore undoes whatever someone changed in the meantime, and two
+automations borrowing the same lamp restore each other's leftovers.
 
-- The snapshot is lost on restart and on `scene.reload`.
-- The restore undoes whatever a person did in the meantime.
-- A restore with no snapshot lights a dark room.
-- A second trigger snapshots the automation's own output.
+Layers solves it by stacking. Each automation puts a **layer** on the light and removes
+it when it's done. The light always shows the **top layer**, and when that one is removed
+it shows the next one down, as it is **now**. Nothing is saved or restored, so nothing
+can go stale.
 
-Layers is the priority-array idea from building automation (BACnet has had it since
-1995), adapted for a house where people also use the switches.
+```text
+   priority 70   washer    orange        ← the lamp shows the top layer
+   priority 40   tv        off
+   ───────────── base      on, 60 %      ← how you left it
+```
 
-## How it works
+## What you get
 
-Each enrolled lamp has:
+- **Automations stop fighting each other.** Higher priority wins; removing a layer
+  reveals the one below.
+- **People always win.** If someone changes a light by hand (switch, app, voice), Layers
+  keeps their setting and gets out of the way on that light.
+- **Survives restarts.** Layers and their timers are stored.
+- **Makes sure commands arrive.** It checks each light after sending a command, retries
+  if needed, and catches up with lights that were offline.
+- **A timer never lights a dark room.** When a layer runs out, it may only turn a light
+  off or dim it.
+- **Opt-in.** Only the lights you choose are managed, and only through Layers' own
+  actions. Your other automations and scenes keep working as they are.
 
-- a **base**: what it shows when nothing is layered on it. The base follows whatever
-  people and other automations do to the lamp.
-- a stack of **layers**, each with an id, a priority (1–99, higher on top) and a command.
+## Install
 
-A layer's mode is one of:
+1. In HACS, add `https://github.com/lukab-dev/ha-layers` as a custom repository
+   (type *Integration*) and install **Layers**. Or copy `custom_components/layers` into
+   your `config/custom_components/` folder.
+2. Restart Home Assistant.
+3. Go to **Settings → Devices & services → Add integration → Layers** and pick the lights
+   it should manage. Switches (smart plugs, relays) work too, as on/off lights.
 
-- **`set`**: decides on/off and its own brightness and colour. Attributes it doesn't
-  give come from below.
-- **`adjust`**: only changes brightness or colour, and only on a lamp that is already on.
-  It never turns a lamp on. Use it for "dim whatever is lit to 25 %".
+Needs Home Assistant 2026.7 or newer.
 
-Colours are passed through exactly as written: an `xy_color` stays xy, because some lamps
-desaturate hs or rgb. Each lamp can hold one layer per priority.
+**Layers starts in watch-only mode.** The **Apply** switch (`switch.layers_apply`) is off,
+so it works out what it *would* do but doesn't touch your lights. Try your automations,
+check the Activity log, and turn Apply on when you're happy.
 
-### When someone else changes a lamp
+## Your first automation
 
-Layers tells its own commands apart from everyone else's by their context ids. Every
-other change counts as external, whoever made it: a person in the app, a wall switch, a
-scene, or another automation. What an external change means depends on the lamp's policy:
+The quickest start is the blueprint, which dims a room while a TV or speaker plays:
 
-| Policy | The change | The layers |
-|---|---|---|
-| `take_back` (default) | becomes the lamp's base | are dropped on that lamp, and each id is blocked there until its owner clears it |
-| `edit_active` | is written into the layer on top; switching the lamp off (or on, from off) also becomes its base | stay; the edit is lost when that layer is cleared, but a switch-off never is |
-| `base_keep_layers` | becomes the base, but the lamp keeps showing your change | stay; `layers.sync` re-applies them |
-| `reassert` (per entity only) | with no service call behind it, is the device misbehaving: ignored | stay, and are sent again after the debounce. App and automation changes still take it back; a second device change within 30 s does too. For a smart plug that comes back on by itself, never for anything with a wall switch |
+[![Import the blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Flukab-dev%2Fha-layers%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Flayers%2Fmedia_dim.yaml)
 
-A layer set with `resume_after_manual` is let back onto a lamp once that lamp has been
-seen off. That suits a nightlight: if the house-wide off catches it mid-walk, the next
-motion can relight it.
-
-A change that turns a lamp on takes everything the lamp then shows, even when the
-call named only the state (Apple Home's "on", Assist's "turn on X"): the base learns
-the brightness and colour the lamp came on at, so a later `clear` can restore them.
-A person changing a lamp while Layers is still delivering a command to it is not
-fought either: the delivery is cancelled and their change is taken.
-
-Some changes are not treated as external:
-
-- a lamp dropping off the network and coming back;
-- a report that has already reverted to its previous value, such as a sub-second blip;
-- a bridge reverting Layers' own command within its reversal window: a failed delivery,
-  retried once. (Someone else's command is never re-sent: a reverted Off is marked for
-  the next `layers.*` call on the lamp to repair; a reverted On counts as a change.)
-
-### Leases and expiry
-
-A layer can have a `ttl` or an `until`. Owners can renew a `ttl` by setting the same
-layer again: an identical request only extends the time (one without a `ttl` leaves
-the lease as it is). That makes the `ttl` a lease that lapses if its owner stops
-renewing it.
-
-**When a layer expires, it may only turn a lamp off or dim it.** If expiring would turn
-a lamp on or brighten it, the layer is dropped and the lamp stays as it is. Not knowing
-how a room should be lit is never a reason to light it. Set `on_expire: render` to opt
-out. An explicit `layers.clear` always restores fully.
-
-### When Layers sends a command
-
-Only in these cases:
-
-- a `layers.set` or `layers.clear` changed the lamp's effective command;
-- `layers.sync`;
-- an expiry allowed by the rule above;
-- a lamp coming back to a command it is owed, provided nobody touched it while it was away;
-- the layers going back on after a retry loop re-sent an old button press;
-- a retry of any of these.
-
-Never because someone else changed a lamp, never just because Home Assistant started,
-and never while the **Apply** switch is off. A lamp left out of step on purpose (by
-observe-only mode, or a manual change kept by `base_keep_layers`) is only pushed by
-`layers.sync`. A lamp nobody layers is never commanded.
-
-## Services
-
-`layers.set`:
+Or write it yourself. Borrowing a light takes one action, and giving it back takes
+another:
 
 ```yaml
+# The film starts: turn the living room lamps off
 action: layers.set
 target:
-  entity_id: [light.lamp_a, light.lamp_b]   # light groups are expanded
+  entity_id: [light.floor_lamp, light.sofa_lamp]
 data:
-  layer: tv            # an id, or "base", or "active" (whatever is on top)
-  priority: 40         # needed when the layer is new on a lamp
-  state: "off"         # or "on" with brightness / colour
+  layer: tv          # any name you like
+  priority: 40       # 1-99, higher wins
+  state: "off"
   transition: 10
-  ttl: "06:00:00"      # or until: "{{ today_at('23:00') }}"
-  owner: tv_dim
 ```
 
 ```yaml
-action: layers.set          # dim what is lit, leave what is off alone
-target: {entity_id: [light.lamp_c, light.lamp_d]}
-data: {layer: tv, priority: 40, mode: adjust, brightness_pct: 25}
-```
-
-`layers.clear`: remove a layer. Its lamps fall back to whatever is below it now.
-
-```yaml
+# The film ends: give the lamps back
 action: layers.clear
-data: {layer: tv, transition: 3}    # without a target: wherever the layer is
+data:
+  layer: tv
 ```
 
-`layer: active` (the layer on top) and `layer: all` need a target.
+When `tv` is cleared, each lamp goes back to whatever is below it: another layer, or
+simply how it was set before.
 
-- `layers.sync`: push the model onto lamps, for example after observe-only mode.
-- `layers.get`: returns each lamp's base, layers, effective command and status.
+<details>
+<summary><b>Full example: TV dimming plus a washer notification</b></summary>
 
-`set`, `clear` and `sync` return a result per lamp when you ask for a response:
-`queued`, `unchanged`, `in_sync`, `pending`, `shadow`, `skipped_tombstoned`,
-`skipped_absent` or `skipped_not_enrolled`.
-
-## Example: a film, with a notification on top
-
-Two automations that know nothing about each other borrow the same lamp. The TV one
-darkens the room while something plays. The notification one turns the sofa lamp orange
-when the washer finishes, until someone says it's emptied.
+Two automations that know nothing about each other, sharing the sofa lamp.
 
 ```yaml
 - alias: "TV: dim the room while playing"
@@ -206,66 +139,153 @@ when the washer finishes, until someone says it's emptied.
       data: {layer: washer, transition: 2}
 ```
 
-What the sofa lamp shows through an evening:
+What the sofa lamp does through the evening:
 
-| Time | What happens | Sofa lamp | Why |
-|---|---|---|---|
-| 20:00 | someone switches it on at 60 % | on, 60 % | that becomes its base |
-| 20:30 | the film starts | off | `tv` (40) is on top |
-| 21:10 | the washer finishes | orange | `washer` (70) is above `tv`; the rest of the room stays dark |
-| 21:15 | someone presses *emptied* | off | clearing `washer` falls through to `tv`, not back to 60 % |
-| 22:30 | the film ends | on, 60 % | clearing `tv` falls through to the base |
+| Time | What happens | Sofa lamp |
+|---|---|---|
+| 20:00 | you switch it on at 60 % | on, 60 % |
+| 20:30 | the film starts | off |
+| 21:10 | the washer finishes | orange (the washer layer is above the TV one) |
+| 21:15 | you press *emptied* | off again, because the film is still on |
+| 22:30 | the film ends | on, 60 % |
 
-Neither automation stores anything or restores anything. If the film had ended while the
-lamp was still orange, it would have stayed orange, and gone to 60 % on *emptied*. If
-someone switches the sofa lamp on by hand mid-film, that lamp keeps their setting and both
-layers are dropped on it (`take_back`). The other lamps stay dark until the film ends.
+</details>
 
-### The TV automation as a blueprint
+## The basics
 
-[![Import the blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Flukab-dev%2Fha-layers%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Flayers%2Fmedia_dim.yaml)
+**A layer** has a name, a priority from 1 to 99, and what the light should do. Each
+light shows its highest-priority layer. A light can hold one layer per priority.
 
-[`blueprints/automation/layers/media_dim.yaml`](blueprints/automation/layers/media_dim.yaml)
-is the first automation above, with the media player, the lights, the level and the
-delays as inputs. It also clears the layer when Home Assistant starts and the film ended
-while it was down. The lights have to be enrolled in Layers first.
+**The base** is what a light shows when it has no layers. You never set it directly: it
+is simply how people and your other automations leave the light.
+
+**Two kinds of layer:**
+- `set` (the default): decides on or off, plus any brightness or colour you give it.
+  Anything you leave out comes from the layer below.
+- `mode: adjust`: only changes brightness or colour, and only on a light that is
+  already on. It never turns a light on. Use it for "dim whatever is lit to 25 %".
+
+**Timers:** give a layer a `ttl` ("06:00:00") or an `until` (a time) as a safety net in
+case the clear never comes. Setting the same layer again restarts the timer. When the
+timer runs out, the layer may only turn the light off or dim it. If removing it would
+light up or brighten a room, the light stays as it is instead. (`on_expire: render`
+turns that rule off.) A `layers.clear` always restores fully.
+
+## When someone changes a light by hand
+
+Layers can tell its own commands apart from everything else. Anything else that changes
+a managed light counts as "someone": a person at the switch, the app, voice, a scene, or
+another automation.
+
+By default (**Take it back**), their change wins. It becomes the light's new base, and the
+layers on that light are removed, on that light only. The automation can't put the same
+layer back on that light until it has cleared it. So when the film ends, the lamp you
+turned on mid-film stays exactly as you set it.
+
+You can choose a different behaviour in the integration's options, for all lights or
+per light:
+
+| Option | When someone changes the light |
+|---|---|
+| **Take it back** (default) | Their change wins and the layers on that light are removed. |
+| **Edit the active layer** | Their change is written into the top layer, which stays. Switching the light off always sticks. |
+| **Keep the layers** | Their change becomes the base, the layers stay, and the light keeps showing their change until `layers.sync`. |
+| **Reassert** (its own list of lights) | For devices that switch themselves back on, like some smart plugs. A change that comes from the device itself is undone. Changes from the app or automations still win. Don't use it on lights with a wall switch. |
+
+## Actions
+
+| Action | What it does |
+|---|---|
+| `layers.set` | Put a layer on lights, or update it. |
+| `layers.clear` | Remove a layer. Without a target, it's removed from every light. `layer: active` (the top one) and `layer: all` need a target. |
+| `layers.sync` | Send every managed light what it should show now, for example after watch-only mode. |
+| `layers.get` | Returns each light's base, layers and current command, for debugging. |
+
+`layers.set` options: `layer`, `priority` (needed the first time a layer goes on a
+light), `mode`, `state`, `brightness` / `brightness_pct`, `color_temp_kelvin`,
+`xy_color` / `hs_color` / `rgb_color`, `transition`, `ttl` / `until`, `on_expire`,
+`resume_after_manual`, `only_if_present` and `owner`. The action's UI form describes each
+one.
 
 ## Entities
 
-- **`switch.layers_apply`**: off means observe only. Layers are still set and changes
-  still classified, but nothing is sent. It starts **off** on a fresh install.
-- **`sensor.layers_status`**: `ok`, `pending`, `failed` or `shadow`.
+- **`switch.layers_apply`**: off means watch-only. Layers still keeps track of
+  everything but sends nothing.
+- **`sensor.layers_status`**: `ok`, `pending` (still delivering), `failed` or `shadow`
+  (watch-only).
 
-The Activity log shows which layer changed a lamp, and on whose behalf.
+The Activity log shows which layer changed a light, and on whose behalf.
 
-## Install
+## Details
 
-Through HACS: add this repository as a custom repository (category *Integration*),
-install **Layers**, restart Home Assistant, then add the integration under Settings →
-Devices & services.
+<details>
+<summary><b>What counts as "someone changed it", and what doesn't</b></summary>
 
-Manually: copy `custom_components/layers` into your `config/custom_components/` and
-restart.
+Layers identifies its own commands by their context ids. These are **not** treated as a
+change:
 
-Configuration is entirely in the UI:
+- a light dropping off the network and coming back;
+- a report that has already gone back to its previous value, such as a sub-second blip;
+- a bridge undoing Layers' own command shortly after accepting it. That's treated as a
+  failed delivery and retried once. (Someone else's command is never re-sent: an Off
+  that got undone is repaired on the next `layers.*` call to that light; an On that got
+  undone counts as a change.)
 
-- the lamps to manage (individual lamps only: groups are expanded by Layers itself);
-- the default policy for manual changes;
-- optionally, lamps with a different policy.
+A change that turns a light on keeps everything the light then shows, even if the
+command only said "on" (Apple Home, Assist). The base learns the brightness and colour
+it came on at, so a later clear can restore them. If a person changes a light while
+Layers is still delivering to it, the delivery is cancelled and the person's change wins.
 
-Start with **Apply** off, watch the decisions in the diagnostics download for a few
-days, then turn it on.
+`resume_after_manual` on a layer lets it come back to a light once that light has been
+seen off. That suits a nightlight: if the "all off" catches it mid-walk, the next motion
+can light it again.
+
+</details>
+
+<details>
+<summary><b>When Layers sends a command</b></summary>
+
+Only when:
+
+- a `layers.set` or `layers.clear` changed what a light should show;
+- you call `layers.sync`;
+- a timer ran out and the rule above allows the change;
+- a light comes back online and is still owed a command, provided nobody touched it
+  while it was away;
+- something replayed an old command to a light (a retry loop re-sending a button press),
+  and the layers are put back;
+- a retry of any of these.
+
+Never because someone else changed a light, never just because Home Assistant started,
+and never while **Apply** is off. A light nobody layers is never commanded.
+
+</details>
+
+<details>
+<summary><b>Response values and other notes</b></summary>
+
+- `set`, `clear` and `sync` can return a result per light: `queued`, `unchanged`,
+  `in_sync`, `pending`, `shadow`, `skipped_tombstoned` (someone took the light back),
+  `skipped_absent` or `skipped_not_enrolled`.
+- Light groups in a target are expanded to their members. In the settings, pick
+  individual lights, not groups.
+- Colours are sent exactly as you write them: `xy_color` stays xy, because some lamps
+  wash out hs or rgb colours.
+- The idea comes from building automation, where BACnet has used priority arrays since
+  1995.
+
+</details>
 
 ## Development
 
 ```bash
-python -m pytest tests/logic                  # pure decision logic, any Python >= 3.12
+python -m pytest tests/logic                  # decision logic, any Python >= 3.12
 uv venv --python 3.14 .venv-ha && uv pip install --python .venv-ha/bin/python -r requirements_test.txt
 .venv-ha/bin/python -m pytest tests/ha        # the integration inside Home Assistant
 ```
 
 The decisions live in `custom_components/layers/logic/`, which has no Home Assistant
-imports. That lets it be tested directly and replayed against recorded history. The
+imports, so it can be tested directly and replayed against recorded history. The full
 specification is [docs/SPEC.md](docs/SPEC.md).
 
 ## Licence
