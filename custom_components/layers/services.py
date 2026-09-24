@@ -20,14 +20,12 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_LAYER,
-    ATTR_MANUAL_TIMEOUT,
     ATTR_MODE,
     ATTR_ON_EXPIRE,
     ATTR_ONLY_IF_PRESENT,
     ATTR_OWNER,
     ATTR_PRIORITY,
     ATTR_RESUME_AFTER_MANUAL,
-    ATTR_SOURCE,
     ATTR_STATE,
     ATTR_TTL,
     ATTR_UNTIL,
@@ -46,7 +44,6 @@ from .logic.model import (
     LAYER_ALL,
     LAYER_BASE,
     MODE_ADJUST,
-    MODE_FOLLOW,
     MODE_SET,
     MODES,
     OFF,
@@ -104,18 +101,6 @@ def _cross_check(data: dict[str, Any]) -> dict[str, Any]:
                 raise vol.Invalid(f"{key} does not apply to layer '{layer}'")
         if data[ATTR_ONLY_IF_PRESENT]:
             raise vol.Invalid(f"only_if_present does not apply to layer '{layer}'")
-    if mode == MODE_FOLLOW:
-        if layer in (LAYER_BASE, LAYER_ACTIVE):
-            raise vol.Invalid(f"a follow layer needs a layer id, not '{layer}'")
-        if ATTR_STATE in data or attrs:
-            raise vol.Invalid("a follow layer takes its brightness and colour from its source: "
-                              "drop 'state', brightness and colour")
-        if ATTR_SOURCE not in data and not data[ATTR_ONLY_IF_PRESENT]:
-            raise vol.Invalid("a follow layer needs a source")
-        return data
-    for key in (ATTR_SOURCE, ATTR_MANUAL_TIMEOUT):
-        if key in data:
-            raise vol.Invalid(f"{key} only applies to mode: follow")
     if mode == MODE_ADJUST:
         if ATTR_STATE in data:
             raise vol.Invalid("an adjust layer changes attributes only: drop 'state'")
@@ -150,8 +135,6 @@ SET_SCHEMA = vol.All(
             vol.Optional(ATTR_ON_EXPIRE, default=ON_EXPIRE_SAFE): vol.In(ON_EXPIRE_CHOICES),
             vol.Optional(ATTR_ONLY_IF_PRESENT, default=False): cv.boolean,
             vol.Optional(ATTR_OWNER): vol.All(cv.string, vol.Length(max=OWNER_MAX_LEN)),
-            vol.Optional(ATTR_SOURCE): cv.entity_id,
-            vol.Optional(ATTR_MANUAL_TIMEOUT): cv.positive_time_period,
         }
     ),
     _cross_check,
@@ -269,10 +252,6 @@ async def _async_set(call: ServiceCall) -> ServiceResponse:
         on_expire=data[ATTR_ON_EXPIRE],
         only_if_present=data[ATTR_ONLY_IF_PRESENT],
         owner=data.get(ATTR_OWNER),
-        source=data.get(ATTR_SOURCE),
-        manual_timeout=(data[ATTR_MANUAL_TIMEOUT].total_seconds()
-                        if ATTR_MANUAL_TIMEOUT in data else None),
-        transition=data.get(ATTR_TRANSITION) if data[ATTR_MODE] == MODE_FOLLOW else None,
     )
     try:
         engine.validate_set(lamps, req)

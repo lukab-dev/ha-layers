@@ -26,7 +26,6 @@ from typing import Any, Literal
 from .model import (
     COLOR_HS,
     COLOR_KELVIN,
-    COLOR_RGB,
     COLOR_XY,
     GROUP_BRIGHTNESS,
     GROUP_COLOR,
@@ -93,16 +92,6 @@ def _to_int(value: Any) -> int | None:
         return None
     try:
         return int(round(float(value)))
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-def _to_float(value: Any) -> float | None:
-    """An attribute as a float, or ``None`` when missing or not a number."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(value)
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -181,42 +170,6 @@ def observed_from_state(state: str, attrs: Mapping[str, Any], at: float) -> Obse
         kelvin=_to_int(attrs.get(ATTR_COLOR_TEMP_KELVIN)),
         at=float(at),
     )
-
-
-def follow_command(state: str | None, attrs: Mapping[str, Any] | None) -> Command:
-    """What a follow layer takes from its source entity: brightness and colour only.
-
-    Nothing (an empty command) while the source is missing, unavailable,
-    unknown or ``off`` (Adaptive Lighting switched off). Brightness is
-    ``brightness`` (0-255), else ``brightness_pct``. Colour is the first of
-    ``color_temp_kelvin``, ``xy_color``, ``hs_color``, ``rgb_color``: Adaptive
-    Lighting's switch carries them all, and kelvin is the one it means for white.
-    """
-    if state is None or state in NO_STATE or state == OFF:
-        return Command(None)
-    attrs = attrs or {}
-    brightness = _to_int(attrs.get(ATTR_BRIGHTNESS))
-    if brightness is None and (pct := _to_float(attrs.get("brightness_pct"))) is not None:
-        brightness = round(255 * pct / 100)
-    if brightness is not None:
-        brightness = min(255, max(0, brightness))
-    return Command(None, brightness, _follow_colour(attrs))
-
-
-def _follow_colour(attrs: Mapping[str, Any]) -> Color | None:
-    try:
-        if (kelvin := _to_float(attrs.get(ATTR_COLOR_TEMP_KELVIN))) is not None and kelvin > 0:
-            return Color.kelvin(kelvin)
-        if (xy := _to_pair(attrs.get(ATTR_XY_COLOR))) is not None:
-            return Color.xy(*xy)
-        if (hs := _to_pair(attrs.get(ATTR_HS_COLOR))) is not None:
-            return Color(COLOR_HS, hs)
-        rgb = attrs.get("rgb_color")
-        if rgb is not None and len(rgb) == 3:
-            return Color(COLOR_RGB, tuple(float(v) for v in rgb))
-    except (TypeError, ValueError):
-        return None
-    return None
 
 
 # --------------------------------------------------------------------------- #

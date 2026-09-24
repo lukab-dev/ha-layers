@@ -37,14 +37,6 @@ See `model.py`. One `Record` per enrolled lamp:
   - `requested_mode` is `None` except while such an edit has changed `mode`
     (an `adjust` layer turned off becomes `set`/off): it then holds the mode
     the owner asked for, so the owner's unchanged request still only refreshes.
-  - A `follow` layer also has `source` (the entity it follows), `manual` (the
-    groups, of `brightness` and `color`, a person took over), `manual_until`
-    (when `manual` empties; `None`: when the lamp is seen off), `manual_timeout`
-    (the option that sets it) and `transition` (of its updates, default
-    `FOLLOW_TRANSITION_S`, 1 s). Its `command` is the source's values as an
-    attributes-only command, written by the engine (7.1), never by the owner;
-    `requested` stays empty. All five are persisted with defaults, so an older
-    Store loads unchanged.
   - **One layer id per priority per lamp.** Setting a new id at a priority
     another id already holds on that lamp is an error (`priority_conflict`).
 - `tombstones[id]`: created when `take_back` drops a layer. A later `set` of that
@@ -103,16 +95,10 @@ Fold, bottom to top:
    - `adjust` → only if `state == on`: its brightness/colour replace those below
      when given; `active = layer.id`. Over an off result it does nothing and does
      not become active.
-   - `follow` → as `adjust`, except that the groups in its `manual` are skipped;
-     it is active only when it replaced a brightness or a colour.
 3. `state is None` → `Resolution(None, active)` ("do nothing").
    `state == off` → `Command(off)`. Otherwise `Command(on, brightness, color)`.
 
-An active `adjust` or `follow` layer does not hold the lamp: its "on" comes from below.
-`editable_layer()` is the layer `active_layer()` would name without the follow layers:
-what `layer: active`, `edit_active` and `reassert` act on, since a follow layer's
-values come from its source. `resolve_without_follow()` is the effective command
-without them (the startup check, 7.4).
+An active `adjust` layer does not hold the lamp: its "on" comes from below.
 `state_holder()` is what the expiry rule (5.4) and the return rule (6.4) ask
 when they need to know whether an owner still holds the lamp, so neither ever
 lights a lamp through an adjust layer.
@@ -305,14 +291,6 @@ it is unknown when the report is missing or unavailable.
   `last_external.policy`, so the cooldown is measured from the last reassert).
 - `replay` (`POLICY_REPLAY`) → `apply_replay` below, so a `FOLLOW_UP` can
   re-apply `last_external.policy` as it is.
-- **Follow layers** are never dropped, tombstoned or edited, under any policy.
-  Except for a reassert, each one adds the groups the person `chosen` to its
-  `manual` (and, with a `manual_timeout`, sets `manual_until = now + timeout`).
-  `chosen` defaults to the attribute groups the change took; the engine passes
-  what was really chosen: a follow-up takes nothing; a call with a known intent,
-  the groups it named (a bare `turn_on` names none); a lamp that just came on,
-  nothing (it shows its power-on level); otherwise the groups that moved
-  (`changed_groups`, 6.2).
 - `take_back`, `edit_active`, `base_keep_layers`, `reassert`: `owed = None`. All
   policies: `last_external = External(..., groups)`. None touches `last_layers_change`.
 - `ExternalResult(dropped: tuple[str, ...], edited: str | None, partial: bool,
@@ -349,9 +327,6 @@ their own do not set it).
 
 - `lift_on_off(rec)`: remove tombstones with `lift_when_off` (called when the
   lamp is observed off).
-- `release_manual(rec, now, off=False)`: follow layers follow again what a person
-  took over: all of them when the lamp is observed off (`off`, next to
-  `lift_on_off`), else those whose `manual_until` has passed (the TTL timer).
 - `record_observed_as_base(rec, obs, caps, now, source)`: `base =
   observed_to_command(obs, caps)`.
 
@@ -581,26 +556,6 @@ still delivered, and why an adjust layer never lights a lamp on its return.
   control (`POLICY_CONTROL`; admins may control all); a call from an unknown user
   is ignored. The user is looked up in an eager task, which completes inside the
   event (the lookup does not suspend), before the call writes any state.
-- A second call listener keeps `domain == "scene"` and `service in {turn_on,
-  apply}` (`scenes.py`). Home Assistant's scenes send nothing to a member that
-  already matches (light and switch `reproduce_state` return early), so neither
-  path above would hear of it. The engine reads what the scene wants of each
-  enrolled member (`scene_config.states` of Home Assistant's own scenes, or
-  `apply`'s `entities`; a vendor scene lists none), then `SCENE_SETTLE_S` (2 s)
-  later takes each member that got no light/switch call under the scene's
-  context and builds the call `reproduce_state` would have made. It goes to
-  `classify_call` (6.3) first: only an `EXTERNAL_INTENT` is handled, as a call
-  (decision `scene_skipped`); anything else is dropped with no trace in the
-  record (decision `scene_skip_ignored`). A user's scene reaches only lamps that
-  user may control, as above.
-- `async_track_state_change_event` on the entities follow layers follow
-  (`source`), re-subscribed whenever that set changes (a set, a clear, an
-  expiry, the end of the grace). A source's state becomes each follow layer's
-  `command` (`follow_command`): `brightness` (else `brightness_pct`) and the
-  first of `color_temp_kelvin`, `xy_color`, `hs_color`, `rgb_color`; nothing
-  while the source is `off`. A source that is unavailable, unknown or removed
-  keeps the last values: an integration reloading must not make every following
-  lamp jump to its base. A `layers.set` and the start read the source at once.
 - `Runtime.returning` is true from a lamp's `TRANSPORT_UP` until its
   `decide_return` has run.
 - `GONE` (the entity was removed: its integration reloading, a deletion) is
@@ -692,18 +647,8 @@ Only:
 (f) the re-render `REPLAY_QUIET_S` after the last replayed foreign call on a
     lamp (5.3 `apply_replay`), putting its layers back;
 (g) a `device` change on an entity with the `reassert` policy while a layer is
-    active (5.3), after the usual debounce or return settle;
-(h) a follow layer's source changed (or its `manual_until` passed) and the
-    lamp's effective command changed, with the layer's `transition`;
-(i) after an external change on any path, a lamp that is on, has a live follow
-    layer and does not show its effective command gets it: a lamp switched on by
-    hand comes on at its power-on level, and the follow values it did not choose
-    are sent. Never an on or off: the on/off is what the person just did.
-(h) and (i) are never sent during the startup grace or to a lamp that is away
-(nothing is owed: the next update or the return brings them), and take the
-guards of (c)-(f). At the end of the grace, a layered lamp that differs from its
-effective command only in what its follow layers give it (`resolve_without_follow`
-matches) gets (h) instead of being marked `unsynced`.
+    active (5.3), after the usual debounce or return settle — the one case an
+    external change answers with a command, and only on entities so configured.
 
 Never because of an external change otherwise, never at startup otherwise, never while
 the apply switch is off, never to a lamp whose effective command is `None`.
@@ -756,7 +701,7 @@ Turning it on sends nothing; `layers.sync` pushes.
 
 | Service | Fields |
 |---|---|
-| `layers.set` | target (entity/group); `layer`; `priority` (1–99); `mode`; `state`; `brightness` \| `brightness_pct`; one of `color_temp_kelvin`, `xy_color`, `hs_color`, `rgb_color`; `transition`; `ttl` \| `until`; `resume_after_manual`; `on_expire`; `only_if_present`; `owner`; `source`, `manual_timeout` (`mode: follow` only, which takes no `state`, brightness or colour) |
+| `layers.set` | target (entity/group); `layer`; `priority` (1–99); `mode`; `state`; `brightness` \| `brightness_pct`; one of `color_temp_kelvin`, `xy_color`, `hs_color`, `rgb_color`; `transition`; `ttl` \| `until`; `resume_after_manual`; `on_expire`; `only_if_present`; `owner` |
 | `layers.clear` | optional target; `layer` (id, `active`, `all` — `active` and `all` need a target; `base` is refused); `transition` |
 | `layers.sync` | optional target |
 | `layers.get` | optional target; response only |

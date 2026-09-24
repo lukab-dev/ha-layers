@@ -39,8 +39,6 @@ ATTR_RESUME_AFTER_MANUAL: Final = "resume_after_manual"
 ATTR_ON_EXPIRE: Final = "on_expire"
 ATTR_ONLY_IF_PRESENT: Final = "only_if_present"
 ATTR_OWNER: Final = "owner"
-ATTR_SOURCE: Final = "source"
-ATTR_MANUAL_TIMEOUT: Final = "manual_timeout"
 
 # Events
 EVENT_RENDER: Final = "layers_render"

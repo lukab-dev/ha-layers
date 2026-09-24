@@ -29,8 +29,7 @@ NO_STATE = frozenset({"unavailable", "unknown"})
 
 MODE_SET = "set"          # decides on/off and merges its attributes over what is below
 MODE_ADJUST = "adjust"    # changes attributes only, and only when what is below is on
-MODE_FOLLOW = "follow"    # like adjust, with its attributes read from another entity
-MODES = (MODE_SET, MODE_ADJUST, MODE_FOLLOW)
+MODES = (MODE_SET, MODE_ADJUST)
 
 LAYER_BASE = "base"
 LAYER_ACTIVE = "active"
@@ -307,13 +306,6 @@ class Layer:
     # The mode the owner asked for, kept only while an edit has changed ``mode``
     # (an adjust layer turned off becomes set/off). None: the same as ``mode``.
     requested_mode: str | None = None
-    # follow only: the entity followed; the groups a person took over, until the lamp
-    # is seen off or ``manual_until``; the option that sets it; the update transition.
-    source: str | None = None
-    manual: frozenset[str] = frozenset()
-    manual_until: float | None = None
-    manual_timeout: float | None = None
-    transition: float | None = None
 
     def live(self, now: float) -> bool:
         return self.expires_at is None or self.expires_at > now
@@ -332,11 +324,6 @@ class Layer:
             "resume_after_manual": self.resume_after_manual,
             "on_expire": self.on_expire,
             "requested_mode": self.requested_mode,
-            "source": self.source,
-            "manual": sorted(self.manual),
-            "manual_until": self.manual_until,
-            "manual_timeout": self.manual_timeout,
-            "transition": self.transition,
         }
 
     @classmethod
@@ -354,11 +341,6 @@ class Layer:
             resume_after_manual=data.get("resume_after_manual", False),
             on_expire=data.get("on_expire", ON_EXPIRE_SAFE),
             requested_mode=data.get("requested_mode"),
-            source=data.get("source"),
-            manual=frozenset(data.get("manual") or ()),
-            manual_until=data.get("manual_until"),
-            manual_timeout=data.get("manual_timeout"),
-            transition=data.get("transition"),
         )
 
 
@@ -607,9 +589,6 @@ class SetRequest:
     on_expire: str = ON_EXPIRE_SAFE
     only_if_present: bool = False
     owner: str | None = None
-    source: str | None = None            # follow: the entity to follow
-    manual_timeout: float | None = None  # follow: a hand change stops following this long
-    transition: float | None = None      # follow: the transition of its updates
 
 
 # Tuning. Constants in v1; measured against a real Hue bridge and Matter lamps.

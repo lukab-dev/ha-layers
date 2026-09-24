@@ -50,6 +50,10 @@ can go stale.
 
 Needs Home Assistant 2026.7 or newer.
 
+This page describes the latest stable release. Pre-releases are built on the
+[`beta`](https://github.com/lukab-dev/ha-layers/tree/beta) branch, whose README describes
+them; to try one, turn on beta versions for Layers in HACS.
+
 **Layers starts in watch-only mode.** The **Apply** switch (`switch.layers_apply`) is off,
 so it works out what it *would* do but doesn't touch your lights. Try your automations,
 check the Activity log, and turn Apply on when you're happy.
@@ -159,23 +163,11 @@ light shows its highest-priority layer. A light can hold one layer per priority.
 **The base** is what a light shows when it has no layers. You never set it directly: it
 is simply how people and your other automations leave the light.
 
-**Three kinds of layer:**
+**Two kinds of layer:**
 - `set` (the default): decides on or off, plus any brightness or colour you give it.
   Anything you leave out comes from the layer below.
 - `mode: adjust`: only changes brightness or colour, and only on a light that is
   already on. It never turns a light on. Use it for "dim whatever is lit to 25 %".
-- `mode: follow` with a `source`: like `adjust`, but the brightness and colour come from
-  another entity's attributes and change when it does. Point it at an
-  [Adaptive Lighting](https://github.com/basnijholt/adaptive-lighting) switch or a
-  template sensor; Layers does no circadian maths itself. Give it a low priority, so a
-  TV dim or a nightlight sits above it:
-
-  ```yaml
-  action: layers.set
-  target: {entity_id: [light.sofa, light.reading]}
-  data: {layer: circadian, priority: 10, mode: follow,
-         source: switch.adaptive_lighting_living_room}
-  ```
 
 **Timers:** give a layer a `ttl` ("06:00:00") or an `until` (a time) as a safety net in
 case the clear never comes. Setting the same layer again restarts the timer. When the
@@ -187,9 +179,7 @@ turns that rule off.) A `layers.clear` always restores fully.
 
 Layers can tell its own commands apart from everything else. Anything else that changes
 a managed light counts as "someone": a person at the switch, the app, voice, a scene, or
-another automation. A scene counts even for a light it didn't need to change: Home
-Assistant sends nothing to a light that already looks the way the scene wants, and Layers
-treats that light as if the scene had set it.
+another automation.
 
 By default (**Take it back**), their change wins. It becomes the light's new base, and the
 layers on that light are removed, on that light only. The automation can't put the same
@@ -206,13 +196,6 @@ per light:
 | **Keep the layers** | Their change becomes the base, the layers stay, and the light keeps showing their change until `layers.sync`. |
 | **Reassert** (its own list of lights) | For devices that switch themselves back on, like some smart plugs. A change that comes from the device itself is undone. Changes from the app or automations still win. Don't use it on lights with a wall switch. |
 
-**Follow layers are never removed by someone's change.** Only what the person changed
-stops following: dim a light by hand and its brightness stays where you put it while its
-colour keeps adapting. It follows again once the light is turned off, or after
-`manual_timeout` if the layer sets one. A light switched on without a brightness or
-colour (a wall switch, voice, a button) gets the follow values straight away; one turned
-on at 30 % keeps its 30 %.
-
 ## Actions
 
 | Action | What it does |
@@ -225,9 +208,8 @@ on at 30 % keeps its 30 %.
 `layers.set` options: `layer`, `priority` (needed the first time a layer goes on a
 light), `mode`, `state`, `brightness` / `brightness_pct`, `color_temp_kelvin`,
 `xy_color` / `hs_color` / `rgb_color`, `transition`, `ttl` / `until`, `on_expire`,
-`resume_after_manual`, `only_if_present` and `owner`; for `mode: follow`, `source` and
-`manual_timeout` (`transition` is then the transition of each update, 1 s by default).
-The action's UI form describes each one.
+`resume_after_manual`, `only_if_present` and `owner`. The action's UI form describes each
+one.
 
 ## Entities
 
@@ -276,13 +258,10 @@ Only when:
   while it was away;
 - something replayed an old command to a light (a retry loop re-sending a button press),
   and the layers are put back;
-- a follow layer's source changed, and a light that is on shows it;
-- someone switched on a light that has a follow layer: it gets the follow values it
-  didn't choose (never an on or off);
 - a retry of any of these.
 
-Never otherwise because someone else changed a light, never just because Home Assistant
-started, and never while **Apply** is off. A light nobody layers is never commanded.
+Never because someone else changed a light, never just because Home Assistant started,
+and never while **Apply** is off. A light nobody layers is never commanded.
 
 </details>
 
@@ -314,6 +293,9 @@ uv venv --python 3.14 .venv-ha && uv pip install --python .venv-ha/bin/python -r
 The decisions live in `custom_components/layers/logic/`, which has no Home Assistant
 imports, so it can be tested directly and replayed against recorded history. The full
 specification is [docs/SPEC.md](docs/SPEC.md).
+
+`main` is always the latest stable release. New work lands on `beta`, and pre-releases
+(`0.2.0b1`) are tagged there. A stable release merges `beta` into `main`.
 
 ## Licence
 

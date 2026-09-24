@@ -106,7 +106,7 @@
         },
         "mode": {
           "name": "Mode",
-          "description": "set decides on/off and its attributes; adjust only changes attributes of a lamp that is already on; follow is adjust with its brightness and colour read from a source entity."
+          "description": "set decides on/off and its attributes; adjust only changes attributes of a lamp that is already on."
         },
         "state": {
           "name": "State",
@@ -163,14 +163,6 @@
         "owner": {
           "name": "Owner",
           "description": "Who set this layer, for the log and diagnostics."
-        },
-        "source": {
-          "name": "Source",
-          "description": "follow only: the entity whose brightness and colour attributes the layer follows, such as an Adaptive Lighting switch or a template sensor."
-        },
-        "manual_timeout": {
-          "name": "Manual timeout",
-          "description": "follow only: after someone changes the lamp by hand, what they changed follows again after this long. Without it, it follows again when the lamp is turned off."
         }
       }
     },
