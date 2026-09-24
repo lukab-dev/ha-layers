@@ -50,6 +50,10 @@ can go stale.
 
 Needs Home Assistant 2026.7 or newer.
 
+This is the `beta` branch: it describes the current pre-release (`0.2.0b1`). The stable
+release and its README are on [`main`](https://github.com/lukab-dev/ha-layers). To try a
+pre-release, turn on beta versions for Layers in HACS.
+
 **Layers starts in watch-only mode.** The **Apply** switch (`switch.layers_apply`) is off,
 so it works out what it *would* do but doesn't touch your lights. Try your automations,
 check the Activity log, and turn Apply on when you're happy.
@@ -314,6 +318,10 @@ uv venv --python 3.14 .venv-ha && uv pip install --python .venv-ha/bin/python -r
 The decisions live in `custom_components/layers/logic/`, which has no Home Assistant
 imports, so it can be tested directly and replayed against recorded history. The full
 specification is [docs/SPEC.md](docs/SPEC.md).
+
+`main` is always the latest stable release. New work lands on `beta`, and pre-releases
+(`0.2.0b1`) are tagged there. A stable release merges `beta` into `main`; drop the
+"This is the `beta` branch" note from Install when it does.
 
 ## Licence
 
