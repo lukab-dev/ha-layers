@@ -1,6 +1,6 @@
 [project]
 name = "ha-layers"
-version = "0.2.0b1"
+version = "0.2.0"
 description = "Priority layers for Home Assistant lights: live commands, persisted, manual changes respected."
 requires-python = ">=3.12"
 license = { text = "MIT" }

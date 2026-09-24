@@ -50,10 +50,6 @@ can go stale.
 
 Needs Home Assistant 2026.7 or newer.
 
-This is the `beta` branch: it describes the current pre-release (`0.2.0b1`). The stable
-release and its README are on [`main`](https://github.com/lukab-dev/ha-layers). To try a
-pre-release, turn on beta versions for Layers in HACS.
-
 **Layers starts in watch-only mode.** The **Apply** switch (`switch.layers_apply`) is off,
 so it works out what it *would* do but doesn't touch your lights. Try your automations,
 check the Activity log, and turn Apply on when you're happy.
