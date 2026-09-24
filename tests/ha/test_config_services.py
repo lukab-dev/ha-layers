@@ -1007,7 +1007,8 @@ LAMP_KEYS = {"active", "effective", "base", "layers", "tombstones", "observed", 
 LAYER_KEYS = {"id", "priority", "mode", "requested", "command", "seq", "set_at", "expires_at",
               "owner", "resume_after_manual", "on_expire", "requested_mode",
               # follow layers (None / empty on the others)
-              "source", "manual", "manual_until", "manual_timeout", "transition"}
+              "source", "manual", "manual_until", "manual_timeout", "transition",
+              "strength"}
 
 
 async def test_get_describes_each_lamp(

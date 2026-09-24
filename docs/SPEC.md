@@ -45,6 +45,9 @@ See `model.py`. One `Record` per enrolled lamp:
     attributes-only command, written by the engine (7.1), never by the owner;
     `requested` stays empty. All five are persisted with defaults, so an older
     Store loads unchanged.
+  - `strength` (`soft` / `sticky` / `locked`, default `soft`): what a change
+    Layers did not make may do to the layer (5.3, "Strength"). Persisted with a
+    default, like the follow fields; a follow layer is always `soft`.
   - **One layer id per priority per lamp.** Setting a new id at a priority
     another id already holds on that lamp is an error (`priority_conflict`).
 - `tombstones[id]`: created when `take_back` drops a layer. A later `set` of that
@@ -204,7 +207,8 @@ None of them sends anything; the caller compares `resolve()` before and after
 `PolicyError(code)` before anything changes, with code `priority_required`,
 `priority_conflict` or `invalid_request` (a command that sets no state,
 brightness or colour; a named layer whose `expires_at` is not after `now`; the
-id `all`; an unknown mode).
+id `all`; an unknown mode; a `strength` on `base` or `active`, an unknown
+strength, or a strength other than `soft` on a follow layer).
 
 - `layer: base` → `base = merge_command(base, req.command)`; if base was
   unknown and the command has no state, the state is `on`. `base_source =
@@ -233,21 +237,26 @@ id `all`; an unknown mode).
     unchanged or omitted → refresh only: update `expires_at` when the request
     gives one (a renewal without `ttl`/`until` keeps the lease the layer has: an
     identical set only extends the time, it never silently makes a leased layer
-    permanent), and `owner` when the request gives one. Nothing else: options a
+    permanent), `owner` and `strength` when the request gives them. Nothing else: options a
     renewal leaves out keep their values. Result `refreshed`. **No render, no
     re-stacking, edits to `command` survive** (including an adjust layer turned
     set/off).
   - present and different → `requested = command = req.command`, `mode` = the
     request's mode, `requested_mode = None`, update priority (conflict check),
-    expiry, `owner` when given, `resume_after_manual` and `on_expire`; keep
-    `seq`. Result `updated`.
+    expiry, `owner` and `strength` when given, `resume_after_manual` and
+    `on_expire`; keep `seq`. Result `updated`. A new layer without a `strength`
+    is `soft`; an existing one keeps its own unless the request names one.
 - Every result except `refreshed`, `skipped_*` sets `last_layers_change = now`.
 
 ### 5.2 `apply_clear(rec, layer, now) -> ClearResult`
 
 - id → remove that layer and that id's tombstone.
-- `active` → remove the top layer (if any).
-- `all` → remove every layer and tombstone.
+- `active` → remove the top layer (if any), unless it is `sticky` or `locked`.
+- `all` → remove every `soft` layer, and every tombstone of a `soft` layer.
+- A `sticky` or `locked` layer, and its tombstone, go only by their own id:
+  that is how their owner holds them. `ClearResult.kept` lists the ones `active`
+  or `all` left; the engine records a `clear_kept` decision, and the service
+  response is unchanged.
 - A layer whose `expires_at` has passed but that `expire()` has not removed yet
   (Home Assistant was down, or the startup grace holds its timer) is not
   removed: it is marked `on_expire = render` and left for `expire()`, which
@@ -256,11 +265,11 @@ id `all`; an unknown mode).
   the startup record what it showed as the base. `resolve()` before and after
   cannot see this; the render happens when `expire()` runs (the end of the
   grace, or the next TTL tick).
-- `ClearResult(removed, lifted, expired)`: layer ids removed, tombstone ids
+- `ClearResult(removed, lifted, expired, kept)`: layer ids removed, tombstone ids
   lifted, expired layer ids marked. Sets `last_layers_change` if a layer was
   removed or marked; lifting a tombstone alone changes no layer and does not.
 
-### 5.3 `apply_external(rec, shown: Command, groups, source, policy, now, user_id=None, *, caps=None) -> ExternalResult`
+### 5.3 `apply_external(rec, shown: Command, groups, source, policy, now, user_id=None, *, caps=None, chosen=None, scope="room") -> ExternalResult`
 
 A change Layers did not make. `shown` is the command the lamp now shows (or the
 intent from a known service call); `groups` is `None` (take every group
@@ -316,7 +325,28 @@ it is unknown when the report is missing or unavailable.
 - `take_back`, `edit_active`, `base_keep_layers`, `reassert`: `owed = None`. All
   policies: `last_external = External(..., groups)`. None touches `last_layers_change`.
 - `ExternalResult(dropped: tuple[str, ...], edited: str | None, partial: bool,
-  reassert: bool)`.
+  reassert: bool, held: tuple[str, ...])`.
+
+**Strength.** `apply_external` also takes `scope` (`room` or `lamp`, 6.5;
+default `room`). Unless the change is reasserted (which keeps every layer
+anyway), before the policy runs:
+
+- with `scope = lamp`, every `sticky` layer is dropped and tombstoned, under any
+  policy: someone dealt with the signal at the lamp. The tombstone records the
+  layer's `strength`, and `lift_when_off` from its `resume_after_manual`, as for
+  a take-back.
+- every remaining `sticky` or `locked` layer is lifted out of the stack. The
+  policy then runs on the `soft` layers alone, so the change is merged into the
+  base underneath (and a soft layer is dropped or edited as the policy says).
+  The lifted layers are put back unchanged, lease included. `held` names the
+  live ones; with any held, `diverged = delivery` if the lamp does not show the
+  effective command (else `None`), and the engine re-shows them (7.3 j).
+
+So a `sticky` layer survives a room change and a hand on the lamp removes it; a
+`locked` layer survives both, and only a clear, its expiry or the Apply switch
+ends it. `dropped` lists dismissed and taken-back layers together, bottom of the
+stack first. `last_external` records `scope` and `held`; a follow-up re-applies
+the same scope.
 
 `apply_replay(rec, shown, groups, source, now, user_id=None) -> ExternalResult`:
 a foreign press that the replay rule (6.1) caught. `base = merge_command(base,
@@ -555,6 +585,23 @@ lamp was untouched is limited to a holding layer or a render that cannot light
 it. That is why an Off pressed while a lamp was away since before startup is
 still delivered, and why an adjust layer never lights a lamp on its return.
 
+### 6.5 `change_scope(lamp, source, call) -> str`
+
+How far a change Layers did not make reached, for strength (5.3). What decides
+it is what the change was aimed at, not who made it: a wall button reaches Home
+Assistant as an automation running a scene, the same as a motion sensor, so
+"person or automation" cannot say whether someone dealt with this lamp.
+
+- `lamp`: a `device` change (no call behind it: the lamp's own switch or
+  dimmer, a vendor app); a `user` change with no known call; or a known call
+  that carries a `user_id`, names this lamp alone (`call.lamps == {lamp}`),
+  reached it through no vendor room group, and is not part of a scene (its tile
+  in the app).
+- `room`: everything else. A scene (any call under a running scene's context,
+  and a member a scene skipped, `CallInfo.scene`), a call reaching several
+  lamps or through a vendor room group, and every call from an automation.
+- A return judged `EXTERNAL` (6.4) is a `device` change: `lamp`.
+
 ## 7. Engine (Home Assistant side)
 
 ### 7.1 Listeners
@@ -703,6 +750,14 @@ Only:
     layer and does not show its effective command gets it: a lamp switched on by
     hand comes on at its power-on level, and the follow values it did not choose
     are sent. Never an on or off: the on/off is what the person just did.
+(j) `HOLD_SETTLE_S` (2 s) after the last report of a change that went under a
+    `sticky` or `locked` layer (5.3), the effective command, once: every further
+    report of the change restarts the wait, so a scene's own command reaches the
+    lamp before ours. A lamp is re-shown at most `HOLD_CAP` (5) times in
+    `HOLD_CAP_WINDOW_S` (60 s); past that it keeps what it shows, is marked
+    `delivery` and counts as failed (7.7), and the layer stays, so a bulb that
+    keeps reverting is not fought forever. The next `layers.*` call on the lamp
+    repairs it. Not to a lamp that is away: the return brings it.
 (h) and (i) are never sent during the startup grace or to a lamp that is away
 (nothing is owed: the next update or the return brings them), and take the
 guards of (c)-(f). At the end of the grace, a layered lamp that differs from its
@@ -760,7 +815,7 @@ Turning it on sends nothing; `layers.sync` pushes.
 
 | Service | Fields |
 |---|---|
-| `layers.set` | target (entity/group); `layer`; `priority` (1–99); `mode`; `state`; `brightness` \| `brightness_pct`; one of `color_temp_kelvin`, `xy_color`, `hs_color`, `rgb_color`; `transition`; `ttl` \| `until`; `resume_after_manual`; `on_expire`; `only_if_present`; `owner`; `source`, `manual_timeout` (`mode: follow` only, which takes no `state`, brightness or colour) |
+| `layers.set` | target (entity/group); `layer`; `priority` (1–99); `mode`; `state`; `brightness` \| `brightness_pct`; one of `color_temp_kelvin`, `xy_color`, `hs_color`, `rgb_color`; `transition`; `ttl` \| `until`; `resume_after_manual`; `on_expire`; `only_if_present`; `owner`; `strength` (`soft` / `sticky` / `locked`; named layers only, never on a follow layer); `source`, `manual_timeout` (`mode: follow` only, which takes no `state`, brightness or colour) |
 | `layers.clear` | optional target; `layer` (id, `active`, `all` — `active` and `all` need a target; `base` is refused); `transition` |
 | `layers.sync` | optional target |
 | `layers.get` | optional target; response only |
@@ -778,5 +833,8 @@ skipped and reported, never raised on.
   than 24 h are ignored).
 - Diagnostics: options, Store, in-flight renders, and a ring buffer of the last
   500 classifier decisions, with `user_id` and context ids redacted.
-- `layers_render`, `layers_render_failed`, `layers_external` events;
+- `layers_render`, `layers_render_failed`, `layers_external` events.
+  `layers_external` carries `entity_id`, `source`, `policy`, `scope`, `dropped`,
+  `edited` and `held`; `dropped` with `scope: lamp` is a sticky signal someone
+  dismissed at the lamp. It fires when a layer was dropped, edited or held;
   `logbook.py` describes `layers_render` so Activity shows the layer and owner.

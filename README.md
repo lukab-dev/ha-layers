@@ -50,6 +50,10 @@ can go stale.
 
 Needs Home Assistant 2026.7 or newer.
 
+This is the `beta` branch: it describes the current pre-release (`0.3.0b1`). The stable
+release and its README are on [`main`](https://github.com/lukab-dev/ha-layers). To try a
+pre-release, turn on beta versions for Layers in HACS.
+
 **Layers starts in watch-only mode.** The **Apply** switch (`switch.layers_apply`) is off,
 so it works out what it *would* do but doesn't touch your lights. Try your automations,
 check the Activity log, and turn Apply on when you're happy.
@@ -220,6 +224,45 @@ colour keeps adapting. It follows again once the light is turned off, or after
 colour (a wall switch, voice, a button) gets the follow values straight away; one turned
 on at 30 % keeps its 30 %.
 
+### Signals that stay: `strength`
+
+"Their change wins" is right for a TV dim, and wrong for a notification. A lamp that
+turns orange to say the bins go out today shouldn't vanish because someone pressed a
+scene on the wall before anyone saw it. Give that layer a `strength`:
+
+| `strength` | A scene, a wall button, "all off", another automation | Someone changing this light itself |
+|---|---|---|
+| `soft` (default) | the option above decides | the option above decides |
+| `sticky` | goes underneath: the layer stays, and the light shows it again | removes the layer: they've seen it |
+| `locked` | goes underneath | goes underneath too |
+
+What decides is what the change was aimed at, not who made it. A wall button reaches
+Home Assistant as an automation running a scene, so it can't be told apart from any other
+automation; but a scene, a call to several lights or any automation is aimed at the room,
+while the light's own switch or dimmer, or tapping that one light in the app, is aimed at
+the light.
+
+```yaml
+action: layers.set
+target: {entity_id: light.sofa}
+data: {layer: bins, priority: 70, xy_color: [0.6, 0.38], brightness: 255,
+       strength: sticky, until: "23:00:00"}
+```
+
+- Whatever went underneath becomes the base: when the owner clears the layer, the light
+  shows the room as it is now, not as it was when the layer went on. A scene that turns
+  the room off leaves a sticky layer lit until it's cleared or expires.
+- A sticky layer someone removed at the light stays off that light: setting it again
+  there is skipped until its owner clears it, like any layer taken back. The
+  `layers_external` event says so (`dropped` with `scope: lamp`), if you want the
+  automation to react.
+- A locked layer is for alarms (a leak, smoke). It comes back within a couple of seconds
+  of any change. A light that keeps changing back is left alone after 5 tries a minute
+  and shows up as failed on `sensor.layers_status`. The **Apply** switch still stops
+  everything.
+- `layer: all` and `layer: active` never remove a sticky or locked layer: only its own
+  id does.
+
 ## Actions
 
 | Action | What it does |
@@ -232,7 +275,7 @@ on at 30 % keeps its 30 %.
 `layers.set` options: `layer`, `priority` (needed the first time a layer goes on a
 light), `mode`, `state`, `brightness` / `brightness_pct`, `color_temp_kelvin`,
 `xy_color` / `hs_color` / `rgb_color`, `transition`, `ttl` / `until`, `on_expire`,
-`resume_after_manual`, `only_if_present` and `owner`; for `mode: follow`, `source` and
+`resume_after_manual`, `only_if_present`, `owner` and `strength`; for `mode: follow`, `source` and
 `manual_timeout` (`transition` is then the transition of each update, 1 s by default).
 The action's UI form describes each one.
 

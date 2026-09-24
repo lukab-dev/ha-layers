@@ -60,6 +60,8 @@ from .model import (
     OWED_ON_MAX_AGE_S,
     Observed,
     Record,
+    SCOPE_LAMP,
+    SCOPE_ROOM,
     SRC_AUTOMATION,
     SRC_DEVICE,
     SRC_OURS,
@@ -125,6 +127,7 @@ class CallInfo:
     lamps: frozenset[str]           # enrolled lamps it targets (groups/rooms expanded)
     via_room: frozenset[str]        # the subset reached through a vendor room/zone group
     first_seen: float               # when this context id was FIRST seen, kept across re-sends
+    scene: bool = False             # made by a scene (its members' calls share its context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,3 +634,24 @@ def decide_return(rec: Record, shown: Observed | None, caps: Caps, now: float) -
     if owed is not None and (not lights or (known and now - owed.since <= OWED_ON_MAX_AGE_S)):
         return ReturnDecision(SEND)
     return ReturnDecision(RECORD)
+
+
+# --------------------------------------------------------------------------- #
+# 6.5 Scope
+# --------------------------------------------------------------------------- #
+
+
+def change_scope(lamp: str, source: str, call: CallInfo | None) -> str:
+    """How far a change Layers did not make reached: ``lamp`` or ``room`` (SPEC 6.5).
+
+    A hand on this lamp is its own switch or dimmer (``device``: no call behind
+    it), or a person's call that names this lamp alone and is not part of a scene
+    (its tile in the app). Everything else is the room: a scene, a call that
+    reaches several lamps or goes through a vendor room group, and any call from
+    an automation - a wall button reaches Home Assistant as one, and so does a
+    motion sensor, so neither says someone dealt with this lamp.
+    """
+    if call is not None:
+        alone = call.lamps == frozenset({lamp}) and not call.via_room
+        return SCOPE_LAMP if call.user_id and alone and not call.scene else SCOPE_ROOM
+    return SCOPE_LAMP if source in (SRC_DEVICE, SRC_USER) else SCOPE_ROOM

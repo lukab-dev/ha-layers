@@ -83,6 +83,9 @@ from .logic.model import (
     DIV_UNSYNCED,
     GROUP_BRIGHTNESS,
     GROUP_COLOR,
+    HOLD_CAP,
+    HOLD_CAP_WINDOW_S,
+    HOLD_SETTLE_S,
     LATE_WINDOW_DEFAULT_S,
     LATE_WINDOW_S,
     LastCommand,
@@ -224,6 +227,7 @@ class Engine:
         self._unsubs: list[CALLBACK_TYPE] = []
         self._failed: set[str] = set()
         self._late_retried: set[str] = set()
+        self._reshows: dict[str, list[float]] = {}   # lamp -> when strong layers were re-shown
         self._releases: dict[str, CALLBACK_TYPE] = {}
         self._scenes: dict[str, _SceneRun] = {}          # scene call context id -> run
         self._sources: frozenset[str] = frozenset()      # entities follow layers follow
@@ -693,7 +697,7 @@ class Engine:
             follow = cl.Verdict(cl.EXTERNAL, source=last.source, groups=last.groups,
                                 replay=last.policy == pol.POLICY_REPLAY)
             self._external(rec, follow, new, caps, now, user_id=last.user_id, policy=last.policy,
-                           follow_up=True)
+                           follow_up=True, scope=last.scope)
             return
         if kind == cl.DEBOUNCE:
             self._start_debounce(rec, old)
@@ -737,9 +741,12 @@ class Engine:
 
     def _external(self, rec: Record, verdict: cl.Verdict, new: Observed | None, caps: Caps,
                   now: float, user_id: str | None = None, *, policy: str | None = None,
-                  follow_up: bool = False, before: Observed | None = None) -> None:
+                  follow_up: bool = False, before: Observed | None = None,
+                  scope: str | None = None) -> None:
         """``before``: what the lamp showed before the change, for follow layers (what
-        the person chose: a lamp that just came on shows its power-on level)."""
+        the person chose: a lamp that just came on shows its power-on level).
+        ``scope``: how far the change reached (SPEC 6.5); worked out here unless a
+        follow-up re-applies the one it had."""
         eid = rec.entity_id
         shown = observed_to_command(new, caps) if new is not None else None
         call = verdict.call
@@ -759,23 +766,23 @@ class Engine:
         if shown is None:
             return
         policy = policy or self.policy_for(eid)
-        result = pol.apply_external(rec, shown, verdict.groups, verdict.source or SRC_DEVICE,
+        source = verdict.source or SRC_DEVICE
+        scope = scope or cl.change_scope(eid, source, call)
+        result = pol.apply_external(rec, shown, verdict.groups, source,
                                     policy, now, who, caps=caps,
-                                    chosen=_chosen(call, before, new, follow_up))
+                                    chosen=_chosen(call, before, new, follow_up), scope=scope)
         if new is not None and new.state == OFF:
             self._seen_off(rec)
         self._failed.discard(eid)
-        if result.dropped or (result.edited and not follow_up):
-            self.hass.bus.async_fire(
-                EVENT_EXTERNAL,
-                {ATTR_ENTITY_ID: eid, "source": verdict.source, "policy": policy,
-                 "dropped": list(result.dropped), "edited": result.edited},
-            )
+        if result.dropped or ((result.edited or result.held) and not follow_up):
+            self._fire_external(eid, verdict.source, policy, scope, result)
         if result.reassert:
             # The one policy that answers an external change with a command (7.3 g):
             # the device changed itself, the effective command goes back on it.
             self._decision(eid, "reassert", source=verdict.source)
             self._render(eid, reason="reassert", parent_id=None, deferred=True)
+        elif result.held:
+            self._hold(rec, scope)
         else:
             self._follow_after_external(rec, now)
         self._schedule_ttl()
@@ -908,7 +915,8 @@ class Engine:
         first, _last = self._call_seen.get(key, (now, now))
         self._call_seen[key] = (first, now)
         self._call_last[ctx.id] = now
-        call = cl.CallInfo(ctx.id, source, ctx.user_id, service, intent, groups, lamps, via, first)
+        call = cl.CallInfo(ctx.id, source, ctx.user_id, service, intent, groups, lamps, via, first,
+                           scene=run is not None)
         self._calls[ctx.id] = call
         for lamp in via:
             self._room_calls[lamp] = call
@@ -944,9 +952,11 @@ class Engine:
             return True
         self._supersede(rec)
         policy = self.policy_for(lamp)
+        scope = cl.change_scope(lamp, call.source, call)
         result = pol.apply_external(rec, shown, verdict.groups, call.source, policy, now,
                                     call.user_id, caps=caps,
-                                    chosen=call.groups & _ATTRS if call.command else frozenset())
+                                    chosen=call.groups & _ATTRS if call.command else frozenset(),
+                                    scope=scope)
         if not rec.available:
             effective = resolve(rec, now).command
             rec.owed = (
@@ -955,15 +965,57 @@ class Engine:
             )
         elif rec.observed is not None and rec.observed.state == OFF:
             self._seen_off(rec)
-        else:
+        elif not result.held:
             self._follow_after_external(rec, now)
-        if result.dropped or result.edited:
-            self.hass.bus.async_fire(
-                EVENT_EXTERNAL,
-                {ATTR_ENTITY_ID: lamp, "source": call.source, "policy": policy,
-                 "dropped": list(result.dropped), "edited": result.edited},
-            )
+        if result.held and rec.available:
+            # The call has not reached the lamp yet: re-show once it has (7.3 j).
+            self._hold(rec, scope)
+        if result.dropped or result.edited or result.held:
+            self._fire_external(lamp, call.source, policy, scope, result)
         return True
+
+    def _fire_external(self, eid: str, source: str | None, policy: str, scope: str,
+                       result: pol.ExternalResult) -> None:
+        """``layers_external``: what a change Layers did not make did to the stack.
+        ``dropped`` with ``scope: lamp`` is a sticky signal someone dismissed at the lamp."""
+        self.hass.bus.async_fire(
+            EVENT_EXTERNAL,
+            {ATTR_ENTITY_ID: eid, "source": source, "policy": policy, "scope": scope,
+             "dropped": list(result.dropped), "edited": result.edited,
+             "held": list(result.held)},
+        )
+
+    # ================================================================ strong layers
+
+    def _hold(self, rec: Record, scope: str) -> None:
+        """A change went under a sticky or locked layer: show it again once the change
+        has settled (SPEC 7.3 j). Every further report of the change restarts the wait,
+        so a scene's own command lands before ours and one render follows."""
+        self._decision(rec.entity_id, "hold", scope=scope)
+        self._later("hold", rec.entity_id, HOLD_SETTLE_S, self._reshow)
+
+    @callback
+    def _reshow(self, eid: str) -> None:
+        rec = self.records.get(eid)
+        if rec is None or not rec.available:
+            return      # away: the return path owes it the layers
+        now = self.now()
+        recent = [t for t in self._reshows.get(eid, ()) if now - t < HOLD_CAP_WINDOW_S]
+        if len(recent) >= HOLD_CAP:
+            # Something keeps changing it back: stop, keep the layers, and say so.
+            self._reshows[eid] = recent
+            self._decision(eid, "hold_capped", reshows=len(recent))
+            rec.diverged = DIV_DELIVERY
+            self._failed.add(eid)
+            self.save()
+            self.notify()
+            return
+        self._flush_debounce(eid)
+        result = self._render(eid, reason="hold", parent_id=None, deferred=True)
+        if result == RESULT_QUEUED:
+            recent.append(now)
+        self._reshows[eid] = recent
+        self.save()
 
     # ================================================================ follow layers
 
@@ -1140,7 +1192,7 @@ class Engine:
             self.hass, {ATTR_ENTITY_ID: lamp, **data}, service, {lamp}
         )
         call = cl.CallInfo(context_id, source, run.user_id, service, intent, groups,
-                           frozenset({lamp}), frozenset(), run.at)
+                           frozenset({lamp}), frozenset(), run.at, scene=True)
         # Only a call the lamp is known to show is recorded; checking first keeps a
         # member that does not match from leaving a phantom command in its record.
         if cl.classify_call(rec, call, self.caps(lamp), now) is None:
@@ -1404,7 +1456,10 @@ class Engine:
                 continue
             self._flush_debounce(eid)
             before = resolve(rec, now).command
-            pol.apply_clear(rec, layer, now)
+            cleared = pol.apply_clear(rec, layer, now)
+            if cleared.kept:
+                # 'all'/'active' never remove a sticky or locked layer: only its id does.
+                self._decision(eid, "clear_kept", layer=layer, kept=list(cleared.kept))
             after = resolve(rec, now).command
             if after != before or self._repair_needed(rec):
                 results[eid] = self._render(eid, reason="clear", parent_id=parent_id,

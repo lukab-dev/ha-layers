@@ -9,12 +9,6 @@ None right now.
 
 ## Next
 
-- **Protected layers.** Two levels:
-  - `protected: automations`: only the owner's `clear` or a person removes it. Other
-    automations, scenes and `clear all` don't.
-  - `protected: full`: only the owner's `clear` removes it. A person's change is undone
-    after a few seconds. It needs a `ttl` or `until`, and the Apply switch still stops it.
-    Meant for real alarms (leak, smoke).
 - **A sensor per light**, showing which layer is on top and the whole stack in its
   attributes, for dashboard cards and for automations that need to check a light.
 - **Area and label targets** on `layers.*`. The code accepts them already; they need tests
@@ -31,7 +25,7 @@ that several automations fight over:
 
 - **Climate**: target temperature, HVAC mode, preset. An `adjust` layer would be an
   offset ("2 °C lower while nobody is home").
-- **Covers**: position and tilt. Protected layers would fit wind and rain protection.
+- **Covers**: position and tilt. Locked layers would fit wind and rain protection.
 - **Fans**: on/off, speed, preset.
 
 Each new domain needs its own answers before it can be built:

@@ -60,6 +60,11 @@ from .model import (
     POLICY_REASSERT,
     POLICY_TAKE_BACK,
     REASSERT_COOLDOWN_S,
+    SCOPE_LAMP,
+    SCOPE_ROOM,
+    STRENGTH_SOFT,
+    STRENGTH_STICKY,
+    STRENGTHS,
     Record,
     SRC_DEVICE,
     SetRequest,
@@ -137,6 +142,7 @@ class ClearResult:
     removed: tuple[str, ...] = ()   # layer ids, bottom of the stack first
     lifted: tuple[str, ...] = ()    # tombstone ids
     expired: tuple[str, ...] = ()   # expired layer ids, left for expire() to render
+    kept: tuple[str, ...] = ()      # sticky/locked layers `all`/`active` left: only their id clears them
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +153,7 @@ class ExternalResult:
     edited: str | None = None       # the layer edit_active changed
     partial: bool = False           # the lamp was marked diverged=partial
     reassert: bool = False          # reassert: base and layers kept, the engine re-renders
+    held: tuple[str, ...] = ()      # sticky/locked layers the change went under: the engine re-shows them
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,9 +255,15 @@ def _drop_all(rec: Record, source: str, now: float) -> tuple[str, ...]:
     """Drop every layer on the lamp but its follow layers, and tombstone each one (take_back).
 
     A follow layer is never dropped by a change Layers did not make: the change
-    takes over only the groups it chose (``_take_over``).
+    takes over only the groups it chose (``_take_over``). Sticky and locked layers
+    are not in ``rec.layers`` while this runs (``apply_external`` lifts them out).
     """
-    dropped = sorted((lay for lay in rec.layers.values() if lay.mode != MODE_FOLLOW), key=_stack_key)
+    return _drop(rec, [lay for lay in rec.layers.values() if lay.mode != MODE_FOLLOW], source, now)
+
+
+def _drop(rec: Record, layers: list[Layer], source: str, now: float) -> tuple[str, ...]:
+    """Drop ``layers`` and tombstone each one, so its owner's next set is skipped."""
+    dropped = sorted(layers, key=_stack_key)
     for layer in dropped:
         rec.tombstones[layer.id] = Tombstone(
             layer_id=layer.id,
@@ -258,6 +271,7 @@ def _drop_all(rec: Record, source: str, now: float) -> tuple[str, ...]:
             expires_at=layer.expires_at,
             lift_when_off=layer.resume_after_manual,
             source=source,
+            strength=layer.strength,
         )
     for layer in dropped:
         del rec.layers[layer.id]
@@ -289,6 +303,8 @@ def _renew(layer: Layer, req: SetRequest, *, keep_lease: bool = False) -> None:
         layer.expires_at = req.expires_at
     if req.owner is not None:
         layer.owner = req.owner
+    if req.strength is not None:
+        layer.strength = req.strength
 
 
 def _update_options(layer: Layer, req: SetRequest) -> None:
@@ -351,6 +367,7 @@ def apply_set(
     ``now``, a reserved id or an unknown mode. Every result but ``refreshed``
     and ``skipped_*`` sets ``last_layers_change``.
     """
+    _check_strength(rec, req)
     if req.mode == MODE_FOLLOW:
         _check_follow(rec, req)
     elif not req.command.groups() and not _renews_follow(rec, req, now):
@@ -419,6 +436,30 @@ def _check_follow(rec: Record, req: SetRequest) -> None:
                           reason=reason)
 
 
+def _check_strength(rec: Record, req: SetRequest) -> None:
+    """``strength`` belongs to a named layer, and never to a follow layer.
+
+    A follow layer is never removed by someone's change in the first place: only
+    what they changed stops following. The strength that counts is the request's,
+    or the layer's own when the request leaves it out.
+    """
+    if req.strength is None and req.mode != MODE_FOLLOW:
+        return
+    reason = None
+    if req.strength is not None and req.strength not in STRENGTHS:
+        reason = f"unknown strength {req.strength!r}"
+    elif req.strength is not None and req.layer in (LAYER_BASE, LAYER_ACTIVE):
+        reason = "strength belongs to a layer id, not to the base or 'active'"
+    elif req.mode == MODE_FOLLOW:
+        layer = rec.layers.get(req.layer)
+        strength = req.strength or (layer.strength if layer is not None else STRENGTH_SOFT)
+        if strength != STRENGTH_SOFT:
+            reason = "a follow layer is always soft: a person's change never removes it anyway"
+    if reason is not None:
+        raise PolicyError(ERR_INVALID_REQUEST, entity_id=rec.entity_id, layer=req.layer,
+                          reason=reason)
+
+
 def _renews_follow(rec: Record, req: SetRequest, now: float) -> bool:
     """A renewal (``only_if_present``) of a follow layer carries no command."""
     layer = rec.layers.get(req.layer)
@@ -480,6 +521,7 @@ def _set_named_layer(
             source=req.source if req.mode == MODE_FOLLOW else None,
             manual_timeout=req.manual_timeout if req.mode == MODE_FOLLOW else None,
             transition=req.transition if req.mode == MODE_FOLLOW else None,
+            strength=req.strength or STRENGTH_SOFT,
         )
         rec.last_layers_change = now
         return SetResult(SET_CREATED, layer_id)
@@ -556,8 +598,13 @@ def apply_clear(rec: Record, layer: str, now: float) -> ClearResult:
     """Apply one ``layers.clear`` to one lamp (SPEC 5.2).
 
     - a layer id: removes that layer and that id's tombstone;
-    - ``active``: removes the layer ``active_layer()`` names, if any;
-    - ``all``: removes every layer and every tombstone.
+    - ``active``: removes the layer ``active_layer()`` names, if any, unless it
+      is sticky or locked;
+    - ``all``: removes every soft layer and every soft layer's tombstone.
+
+    Sticky and locked layers (and their tombstones) go only by their own id,
+    which is how their owner holds them; ``ClearResult.kept`` lists the ones
+    ``active``/``all`` left.
 
     Live layers are removed. An expired one that ``expire`` has not removed yet
     (Home Assistant was down, or the startup grace holds its timer) is marked
@@ -574,15 +621,20 @@ def apply_clear(rec: Record, layer: str, now: float) -> ClearResult:
             reason="the base cannot be cleared",
         )
     expired: tuple[str, ...] = ()
+    kept: tuple[str, ...] = ()
     if layer == LAYER_ACTIVE:
         top = active_layer(rec, now)
-        removed = (top.id,) if top is not None else ()
+        removed = (top.id,) if top is not None and not top.strong else ()
+        kept = (top.id,) if top is not None and top.strong else ()
         lifted: tuple[str, ...] = ()
     elif layer == LAYER_ALL:
-        removed = tuple(lay.id for lay in live_layers(rec, now))
-        over = sorted((lay for lay in rec.layers.values() if not lay.live(now)), key=_stack_key)
+        removed = tuple(lay.id for lay in live_layers(rec, now) if not lay.strong)
+        kept = tuple(lay.id for lay in live_layers(rec, now) if lay.strong)
+        over = sorted((lay for lay in rec.layers.values() if not lay.live(now) and not lay.strong),
+                      key=_stack_key)
         expired = tuple(lay.id for lay in over)
-        lifted = tuple(sorted(rec.tombstones))
+        lifted = tuple(sorted(t for t, tomb in rec.tombstones.items()
+                              if tomb.strength == STRENGTH_SOFT))
     else:
         target = rec.layers.get(layer)
         removed = (layer,) if target is not None and target.live(now) else ()
@@ -597,7 +649,7 @@ def apply_clear(rec: Record, layer: str, now: float) -> ClearResult:
         del rec.tombstones[layer_id]
     if removed or expired:
         rec.last_layers_change = now
-    return ClearResult(removed, lifted, expired)
+    return ClearResult(removed, lifted, expired, kept)
 
 
 # --------------------------------------------------------------------------- #
@@ -616,6 +668,7 @@ def apply_external(
     *,
     caps: Caps | None = None,
     chosen: frozenset[str] | None = None,
+    scope: str = SCOPE_ROOM,
 ) -> ExternalResult:
     """Record a change Layers did not make, under the lamp's policy (SPEC 5.3).
 
@@ -654,6 +707,19 @@ def apply_external(
     passes what was really chosen: a known call's named groups, nothing for a
     lamp that just came on at its power-on level.
 
+    Strength (SPEC 5.3, "Strength"): the policy only ever sees the soft layers.
+    Before it runs, with ``scope`` saying how far the change reached:
+
+    - ``sticky`` layers, when the change was a hand on this lamp (``SCOPE_LAMP``),
+      are dropped and tombstoned whatever the policy: someone dealt with the
+      signal. The tombstone keeps the layer's strength.
+    - every other ``sticky`` or ``locked`` layer is lifted out, the policy runs on
+      what is left (so the change goes into the base underneath), and they are put
+      back unchanged. ``held`` names them; if the lamp does not show the effective
+      command it is marked ``delivery`` and the engine shows them again.
+
+    A reassert keeps every layer anyway, so none of this applies to one.
+
     Every policy but ``replay`` clears ``owed``; all record ``last_external``.
     None of them touches ``last_layers_change``, which marks changes made
     through Layers.
@@ -676,7 +742,16 @@ def apply_external(
         else:
             policy = POLICY_TAKE_BACK
 
+    dismissed: tuple[str, ...] = ()
+    held: list[Layer] = []
+    stack = {lay.id: _stack_key(lay) for lay in rec.layers.values()}   # dropped ids keep this order
     if not reassert:
+        if scope == SCOPE_LAMP:
+            dismissed = _drop(rec, [lay for lay in rec.layers.values()
+                                    if lay.strength == STRENGTH_STICKY], source, now)
+        held = [lay for lay in rec.layers.values() if lay.strong]
+        for layer in held:
+            del rec.layers[layer.id]
         taken = shown.groups() if groups is None else shown.groups() & groups
         _take_over(rec, taken if chosen is None else chosen, now)
 
@@ -712,12 +787,24 @@ def apply_external(
         partial = _partial(rec, groups, now, caps)
         rec.diverged = DIV_PARTIAL if partial else None
 
+    for layer in held:
+        rec.layers[layer.id] = layer
+    held_ids = tuple(layer.id for layer in sorted(held, key=_stack_key) if layer.live(now))
+    if held_ids:
+        # The change is in the base now; the lamp should show the strong layer again.
+        # Unknown (no report yet, the intent path before the lamp answers) is left to
+        # the report that follows: it comes through here again.
+        partial = False
+        rec.diverged = DIV_DELIVERY if _shows(rec, resolve(rec, now).command, caps) is False else None
+    dropped = tuple(sorted(dismissed + dropped, key=stack.__getitem__))
+
     rec.owed = None
     rec.last_external = External(
         at=now, source=source, policy=POLICY_REASSERT if reassert else policy, user_id=user_id,
-        dropped=dropped, edited=edited, groups=groups,
+        dropped=dropped, edited=edited, groups=groups, scope=scope, held=held_ids,
     )
-    return ExternalResult(dropped, edited, partial, reassert)
+    return ExternalResult(dropped, edited, partial, reassert, held_ids)
+
 
 
 def _edit_from_external(top: Layer, shown: Command, groups: frozenset[str] | None) -> None:

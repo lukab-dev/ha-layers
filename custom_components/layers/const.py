@@ -41,6 +41,7 @@ ATTR_ONLY_IF_PRESENT: Final = "only_if_present"
 ATTR_OWNER: Final = "owner"
 ATTR_SOURCE: Final = "source"
 ATTR_MANUAL_TIMEOUT: Final = "manual_timeout"
+ATTR_STRENGTH: Final = "strength"
 
 # Events
 EVENT_RENDER: Final = "layers_render"

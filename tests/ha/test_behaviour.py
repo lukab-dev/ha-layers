@@ -198,8 +198,8 @@ async def test_take_back_by_a_person_from_the_app(
     assert rec.last_external.user_id == hass_admin_user.id
     assert rec.diverged is None
     assert [e.data for e in externals] == [
-        {"entity_id": A, "source": "user", "policy": "take_back", "dropped": ["hold"],
-         "edited": None}
+        {"entity_id": A, "source": "user", "policy": "take_back", "scope": "lamp",
+         "dropped": ["hold"], "edited": None, "held": []}
     ]
     # Layers never answers a person: nothing more is sent, now or later.
     await advance(hass, freezer, 60)
@@ -348,8 +348,8 @@ async def test_edit_active_puts_a_persons_change_into_the_layer(
     assert rec.tombstones == {}
     assert rec.base == Command("on", 102, WARM)
     assert [e.data for e in externals] == [
-        {"entity_id": A, "source": "user", "policy": "edit_active", "dropped": [],
-         "edited": "hold"}
+        {"entity_id": A, "source": "user", "policy": "edit_active", "scope": "lamp",
+         "dropped": [], "edited": "hold", "held": []}
     ]
     # The owner re-sending what it asked for only refreshes: the person's edit stays.
     assert await layers(hass, "set", entity_id=A, layer="hold", priority=40,

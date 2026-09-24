@@ -102,6 +102,14 @@ set:
     manual_timeout:
       selector:
         duration:
+    strength:
+      default: soft
+      selector:
+        select:
+          options:
+            - soft
+            - sticky
+            - locked
 
 clear:
   target:

@@ -51,6 +51,21 @@ POLICIES = (POLICY_TAKE_BACK, POLICY_EDIT_ACTIVE, POLICY_BASE_KEEP_LAYERS, POLIC
 DEFAULT_POLICIES = (POLICY_TAKE_BACK, POLICY_EDIT_ACTIVE, POLICY_BASE_KEEP_LAYERS)
 REASSERT_COOLDOWN_S = 30.0
 
+# What a change Layers did not make can do to a layer (SPEC 5.3). A person's change
+# means "I want the light like this": right for a TV dim, wrong for a notification that
+# a scene would wipe before anyone saw it.
+STRENGTH_SOFT = "soft"       # the lamp's policy decides, as for every layer before 0.3
+STRENGTH_STICKY = "sticky"   # a room change goes under it; a hand on this lamp removes it
+STRENGTH_LOCKED = "locked"   # every change goes under it; only a clear (or Apply off) ends it
+STRENGTHS = (STRENGTH_SOFT, STRENGTH_STICKY, STRENGTH_LOCKED)
+STRONG = frozenset({STRENGTH_STICKY, STRENGTH_LOCKED})
+
+# How far a change Layers did not make reached (SPEC 6.5). A wall button reaches Home
+# Assistant as an automation running a scene, so "a person or an automation" cannot say
+# whether someone dealt with THIS lamp; what the change was aimed at can.
+SCOPE_ROOM = "room"   # a scene, several lamps, a vendor room group, any automation
+SCOPE_LAMP = "lamp"   # the lamp's own switch or dimmer, or a person's call to it alone
+
 ON_EXPIRE_SAFE = "safe"      # an expiry may turn a lamp off or dim it, never on or brighter
 ON_EXPIRE_RENDER = "render"  # an expiry renders whatever is below, like an explicit clear
 ON_EXPIRE_CHOICES = (ON_EXPIRE_SAFE, ON_EXPIRE_RENDER)
@@ -314,9 +329,14 @@ class Layer:
     manual_until: float | None = None
     manual_timeout: float | None = None
     transition: float | None = None
+    strength: str = STRENGTH_SOFT
 
     def live(self, now: float) -> bool:
         return self.expires_at is None or self.expires_at > now
+
+    @property
+    def strong(self) -> bool:
+        return self.strength in STRONG
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -337,6 +357,7 @@ class Layer:
             "manual_until": self.manual_until,
             "manual_timeout": self.manual_timeout,
             "transition": self.transition,
+            "strength": self.strength,
         }
 
     @classmethod
@@ -359,6 +380,7 @@ class Layer:
             manual_until=data.get("manual_until"),
             manual_timeout=data.get("manual_timeout"),
             transition=data.get("transition"),
+            strength=data.get("strength", STRENGTH_SOFT),
         )
 
 
@@ -371,6 +393,7 @@ class Tombstone:
     expires_at: float | None = None
     lift_when_off: bool = False     # resume_after_manual: lifts when the lamp is next seen off
     source: str = SRC_DEVICE
+    strength: str = STRENGTH_SOFT   # the dropped layer's: `clear all` leaves a strong one's
 
     def live(self, now: float) -> bool:
         return self.expires_at is None or self.expires_at > now
@@ -382,6 +405,7 @@ class Tombstone:
             "expires_at": self.expires_at,
             "lift_when_off": self.lift_when_off,
             "source": self.source,
+            "strength": self.strength,
         }
 
     @classmethod
@@ -392,6 +416,7 @@ class Tombstone:
             expires_at=data.get("expires_at"),
             lift_when_off=data.get("lift_when_off", False),
             source=data.get("source", SRC_DEVICE),
+            strength=data.get("strength", STRENGTH_SOFT),
         )
 
 
@@ -491,6 +516,8 @@ class External:
     dropped: tuple[str, ...] = ()
     edited: str | None = None
     groups: frozenset[str] | None = None
+    scope: str = SCOPE_ROOM         # how far the change reached; a follow-up reuses it
+    held: tuple[str, ...] = ()      # strong layers it went under
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -501,6 +528,8 @@ class External:
             "dropped": list(self.dropped),
             "edited": self.edited,
             "groups": sorted(self.groups) if self.groups is not None else None,
+            "scope": self.scope,
+            "held": list(self.held),
         }
 
     @classmethod
@@ -516,6 +545,8 @@ class External:
             dropped=tuple(data.get("dropped", ())),
             edited=data.get("edited"),
             groups=frozenset(groups) if groups is not None else None,
+            scope=data.get("scope", SCOPE_ROOM),
+            held=tuple(data.get("held", ())),
         )
 
 
@@ -610,6 +641,7 @@ class SetRequest:
     source: str | None = None            # follow: the entity to follow
     manual_timeout: float | None = None  # follow: a hand change stops following this long
     transition: float | None = None      # follow: the transition of its updates
+    strength: str | None = None          # None: a new layer is soft, an existing one keeps its own
 
 
 # Tuning. Constants in v1; measured against a real Hue bridge and Matter lamps.
@@ -617,6 +649,13 @@ TOL_BRIGHTNESS = 5          # of 255
 TOL_KELVIN = 100
 TOL_XY = 0.03
 SETTLE_S = 2.0              # wait after a command before verifying
+# Strong layers (SPEC 7.3 j): a change that went under one is followed by one re-show
+# HOLD_SETTLE_S after the last report of it (a scene's own command lands first), and a
+# lamp is re-shown at most HOLD_CAP times in HOLD_CAP_WINDOW_S - past that it keeps what
+# it shows and counts as failed, so a bulb that keeps reverting is not fought forever.
+HOLD_SETTLE_S = 2.0
+HOLD_CAP = 5
+HOLD_CAP_WINDOW_S = 60.0
 SLOW_OFF_S = 15.0           # Hue can report an optimistic off and correct it ~10 s later
 LATE_RECHECK_S = 45.0       # second verification for platforms with late reversals
 LATE_WINDOW_S = {"hue": 60.0}   # no-context reversal after a command = failed delivery

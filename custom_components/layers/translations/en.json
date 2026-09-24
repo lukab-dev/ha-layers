@@ -171,6 +171,10 @@
         "manual_timeout": {
           "name": "Manual timeout",
           "description": "follow only: after someone changes the lamp by hand, what they changed follows again after this long. Without it, it follows again when the lamp is turned off."
+        },
+        "strength": {
+          "name": "Strength",
+          "description": "What someone else's change does to this layer. soft (default): it takes the lamp back. sticky: a scene, a wall button or another automation goes underneath and the layer stays; changing this lamp itself removes it. locked: every change goes underneath; only clearing the layer (or turning Apply off) ends it."
         }
       }
     },

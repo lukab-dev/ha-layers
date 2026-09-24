@@ -29,6 +29,7 @@ from .const import (
     ATTR_RESUME_AFTER_MANUAL,
     ATTR_SOURCE,
     ATTR_STATE,
+    ATTR_STRENGTH,
     ATTR_TTL,
     ATTR_UNTIL,
     DOMAIN,
@@ -53,6 +54,8 @@ from .logic.model import (
     ON,
     ON_EXPIRE_CHOICES,
     ON_EXPIRE_SAFE,
+    STRENGTH_SOFT,
+    STRENGTHS,
     Color,
     Command,
     SetRequest,
@@ -99,7 +102,7 @@ def _cross_check(data: dict[str, Any]) -> dict[str, Any]:
     layer, mode = data[ATTR_LAYER], data[ATTR_MODE]
     attrs = [k for k in (*_BRIGHTNESS, *_COLORS) if k in data]
     if layer in (LAYER_BASE, LAYER_ACTIVE):
-        for key in (ATTR_PRIORITY, ATTR_TTL, ATTR_UNTIL):
+        for key in (ATTR_PRIORITY, ATTR_TTL, ATTR_UNTIL, ATTR_STRENGTH):
             if key in data:
                 raise vol.Invalid(f"{key} does not apply to layer '{layer}'")
         if data[ATTR_ONLY_IF_PRESENT]:
@@ -112,6 +115,8 @@ def _cross_check(data: dict[str, Any]) -> dict[str, Any]:
                               "drop 'state', brightness and colour")
         if ATTR_SOURCE not in data and not data[ATTR_ONLY_IF_PRESENT]:
             raise vol.Invalid("a follow layer needs a source")
+        if data.get(ATTR_STRENGTH, STRENGTH_SOFT) != STRENGTH_SOFT:
+            raise vol.Invalid("a follow layer is always soft: a person's change never removes it")
         return data
     for key in (ATTR_SOURCE, ATTR_MANUAL_TIMEOUT):
         if key in data:
@@ -152,6 +157,7 @@ SET_SCHEMA = vol.All(
             vol.Optional(ATTR_OWNER): vol.All(cv.string, vol.Length(max=OWNER_MAX_LEN)),
             vol.Optional(ATTR_SOURCE): cv.entity_id,
             vol.Optional(ATTR_MANUAL_TIMEOUT): cv.positive_time_period,
+            vol.Optional(ATTR_STRENGTH): vol.In(STRENGTHS),
         }
     ),
     _cross_check,
@@ -273,6 +279,7 @@ async def _async_set(call: ServiceCall) -> ServiceResponse:
         manual_timeout=(data[ATTR_MANUAL_TIMEOUT].total_seconds()
                         if ATTR_MANUAL_TIMEOUT in data else None),
         transition=data.get(ATTR_TRANSITION) if data[ATTR_MODE] == MODE_FOLLOW else None,
+        strength=data.get(ATTR_STRENGTH),
     )
     try:
         engine.validate_set(lamps, req)
