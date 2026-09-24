@@ -694,7 +694,11 @@ Only:
 (g) a `device` change on an entity with the `reassert` policy while a layer is
     active (5.3), after the usual debounce or return settle;
 (h) a follow layer's source changed (or its `manual_until` passed) and the
-    lamp's effective command changed, with the layer's `transition`;
+    lamp's effective command changed, with the layer's `transition`. Like every
+    render, it is skipped while the lamp `matches` the command (section 4; tolerances
+    `TOL_KELVIN` 100, `TOL_BRIGHTNESS` 5, `TOL_XY` 0.03), so a source that moves in
+    small steps reaches the lamp in steps of about the tolerance, not on every
+    update. The layer's `command` always holds the latest values;
 (i) after an external change on any path, a lamp that is on, has a live follow
     layer and does not show its effective command gets it: a lamp switched on by
     hand comes on at its power-on level, and the follow values it did not choose

@@ -181,6 +181,13 @@ is simply how people and your other automations leave the light.
          source: switch.adaptive_lighting_living_room}
   ```
 
+  Every update of the source reaches the layer, but a light is only sent a command when
+  the new values no longer match what it shows, within the same tolerances Layers uses
+  everywhere: 100 K of colour temperature, 5 of 255 brightness, 0.03 in xy. Adaptive
+  Lighting updates every 90 s by default and moves a few kelvin each time, so a light
+  typically gets a new colour every 10 minutes or so, in steps of about 100 K. That is
+  deliberate: steps that size are hard to see, and it keeps commands to the lights down.
+
 **Timers:** give a layer a `ttl` ("06:00:00") or an `until` (a time) as a safety net in
 case the clear never comes. Setting the same layer again restarts the timer. When the
 timer runs out, the layer may only turn the light off or dim it. If removing it would
