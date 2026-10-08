@@ -183,6 +183,9 @@ kelvin_to_xy(kelvin: float) -> tuple[float, float]
   Home Assistant uses it both to emulate kelvin on colour lamps and for a CT
   lamp's reported `xy_color`. It is not the Planckian locus (2700 K comes out
   near (0.525, 0.388), not (0.460, 0.411)).
+- `already_shows(O, call, caps, last)`: what a render checks before it sends
+  (7.2): `matches` is `yes`, and when the call carries a colour that
+  `compared_groups` leaves out, `project(last)` carries the same one.
 - `compared_groups`: the attribute groups `matches` actually checks for a
   report and a `turn_on` call: `brightness` when the call has it and the lamp
   reports one; `color` for xy, and for kelvin unless it is not compared (above).
@@ -681,7 +684,10 @@ Assistant as an automation running a scene, the same as a motion sensor, so
   newer render, a take-back, turning the apply switch off, and unload cancel it.
 - A render starts only when the lamp's effective command changed (or a targeted
   call repairs a `delivery`/`partial`/`colour` divergence, or `sync`), and only
-  if the lamp does not already match. The lamp's report only counts as matching
+  if the lamp does not already match (`already_shows`: a colour `matches` does
+  not compare, such as hs or rgb, only matches when it is the colour of the
+  lamp's `last_command`, or a change of only that colour would never be sent).
+  The lamp's report only counts as matching
   when no render of a different command is in flight: that command may already
   have gone out, with the report still to come. Identical in-flight renders are
   kept.

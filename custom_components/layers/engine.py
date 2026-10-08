@@ -64,6 +64,7 @@ from .logic import classify as cl
 from .logic import policy as pol
 from .logic.capability import (
     MATCH_YES,
+    already_shows,
     caps_from_attrs,
     close,
     follow_command,
@@ -1247,7 +1248,8 @@ class Engine:
         if (
             rec.observed is not None
             and rec.available
-            and matches(rec.observed, call, caps) == MATCH_YES
+            and already_shows(rec.observed, call, caps,
+                              rec.last_command.target if rec.last_command else None)
             # A render of a different command may already have gone out, with the
             # lamp's report of it still to come: only a render of this command, or
             # none at all, lets the report stand for the lamp.
