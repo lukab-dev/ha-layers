@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 from typing import Any
 
@@ -107,12 +107,14 @@ from .logic.model import (
     REPLAY_QUIET_S,
     RETURN_SETTLE_S,
     Record,
+    SCOPE_ROOM,
     SRC_AUTOMATION,
     SRC_DEVICE,
     SRC_USER,
     STARTUP_GRACE_S,
     SetRequest,
     TOL_BRIGHTNESS,
+    merge_command,
 )
 from .logic.resolve import resolve, resolve_without_follow
 from .render import Renderer, RenderJob
@@ -133,6 +135,7 @@ SAVE_DELAY_S = 2.0              # model changes
 SAVE_LAZY_S = 60.0              # observed-only changes
 SCENE_SETTLE_S = 2.0            # a scene's calls to its members all start well inside this
 FOLLOW_TRANSITION_S = 1.0       # a follow layer's updates, unless it sets its own
+REASON_SET_BASE = "set_base"    # a render started by layers.set_base
 _ATTRS = frozenset({GROUP_BRIGHTNESS, GROUP_COLOR})
 
 # Divergences that only layers.sync repairs: no deferred render pushes them (SPEC 2).
@@ -1521,9 +1524,23 @@ class Engine:
         if rec.owed is not None and not rec.owed.missed:
             rec.owed = None
 
-    def render_succeeded(self, eid: str) -> None:
+    def render_succeeded(self, job: RenderJob) -> RenderJob:
+        """A render was verified. Returns the job its late re-check should check: a
+        ``set_base`` render whose base just learned what the lamp chose for itself
+        (``_fill_base_gaps``) is re-checked against the filled command, which the
+        lamp already shows."""
+        eid = job.entity_id
         self._failed.discard(eid)
+        rec = self.records.get(eid)
+        if job.reason == REASON_SET_BASE and rec is not None and self._fill_base_gaps(rec):
+            caps = self.caps(eid)
+            effective = resolve(rec, self.now()).command
+            call = project(effective, caps)
+            if (effective is not None and call is not None and rec.observed is not None
+                    and matches(rec.observed, call, caps) == MATCH_YES):
+                job = replace(job, target=effective, call=call)
         self.notify()
+        return job
 
     def render_failed(self, eid: str) -> None:
         self._failed.add(eid)
@@ -1666,6 +1683,89 @@ class Engine:
         self.save()
         self.notify()
         return results
+
+    def set_base(self, wanted: dict[str, tuple[Command, frozenset[str]]], *, source: str,
+                 user_id: str | None, transition: float | None,
+                 parent_id: str | None) -> dict[str, str]:
+        """``layers.set_base`` (SPEC 5.6): the base of each lamp is now what a scene wants
+        of it, and the lamp gets its effective command at once, layers included.
+
+        ``wanted`` maps each lamp to the scene's command for it and the groups the
+        scene names (with ``state``). The layers react as they would to the same
+        scene reaching the lamp directly (``apply_external``, room scope); what
+        differs is that nothing reaches the lamp before Layers has resolved it.
+        """
+        now = self.now()
+        results: dict[str, str] = {}
+        for eid, (command, groups) in sorted(wanted.items()):
+            rec = self.records.get(eid)
+            if rec is None:
+                results[eid] = RESULT_SKIPPED_NOT_ENROLLED
+                continue
+            results[eid] = self._set_base_lamp(rec, command, groups, source, user_id, now,
+                                               transition=transition, parent_id=parent_id)
+        self._track_sources()
+        self._schedule_ttl()
+        self.save()
+        self.notify()
+        return results
+
+    def _set_base_lamp(self, rec: Record, command: Command, groups: frozenset[str], source: str,
+                       user_id: str | None, now: float, *, transition: float | None,
+                       parent_id: str | None) -> str:
+        eid = rec.entity_id
+        self._flush_debounce(eid)       # a person's pending change is judged first
+        self._learn_base(rec, now)
+        caps = self.caps(eid)
+        diverged = rec.diverged
+        result = pol.apply_external(rec, command, groups, source, self.policy_for(eid), now,
+                                    user_id, caps=caps, chosen=groups & _ATTRS, scope=SCOPE_ROOM)
+        # apply_external judged a lamp that has already taken the change (a held layer
+        # not shown, a kept change shown); nothing has been sent to this one yet. The
+        # render below settles its divergence, as for any targeted call.
+        rec.diverged = diverged
+        # Nothing went under a strong layer on the lamp, and the render carries the
+        # follow values: no re-show and no follow-on render are due.
+        self._cancel("hold", eid)
+        self._cancel("follow_on", eid)
+        # Whatever an earlier call asked of the lamp, or was still fading, is over: the
+        # lamp's level is this render's to say.
+        self._asked.pop(eid, None)
+        self._fading_until.pop(eid, None)
+        policy = rec.last_external.policy if rec.last_external else self.policy_for(eid)
+        self._decision(eid, "set_base", source=source, policy=policy,
+                       dropped=list(result.dropped), held=list(result.held))
+        if result.dropped or result.edited or result.held:
+            self._fire_external(eid, source, policy, SCOPE_ROOM, result)
+        return self._render(eid, reason=REASON_SET_BASE, parent_id=parent_id,
+                            transition=transition)
+
+    def _fill_base_gaps(self, rec: Record) -> bool:
+        """After a verified ``set_base`` render: a brightness or colour that neither the
+        base nor any layer gives was the lamp's own choice (a lamp turned on from off
+        by a scene naming only its brightness comes on in the colour it remembers).
+        The base learns it, so that a layer cleared later has something to restore.
+        The direct path gets the same from the lamp's report (SPEC 6.1 step 6)."""
+        base, obs = rec.base, rec.observed
+        if base is None or not base.is_on or obs is None or obs.state != ON:
+            return False
+        effective = resolve(rec, self.now()).command
+        shown = observed_to_command(obs, self.caps(rec.entity_id))
+        if effective is None or not effective.is_on or shown is None:
+            return False
+        gaps = frozenset(
+            group for group, mine, theirs, lamp in (
+                (GROUP_BRIGHTNESS, base.brightness, effective.brightness, shown.brightness),
+                (GROUP_COLOR, base.color, effective.color, shown.color),
+            )
+            if mine is None and theirs is None and lamp is not None
+        )
+        if not gaps:
+            return False
+        rec.base = merge_command(base, shown, gaps)
+        self._decision(rec.entity_id, "base_learned", groups=sorted(gaps))
+        self.save()
+        return True
 
     def clear_layer(self, lamps: list[str] | None, layer: str, *, transition: float | None,
                     parent_id: str | None) -> dict[str, str]:

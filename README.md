@@ -223,7 +223,9 @@ stops following: dim a light by hand and its brightness stays where you put it w
 colour keeps adapting. It follows again once the light is turned off, or after
 `manual_timeout` if the layer sets one. A light switched on without a brightness or
 colour (a wall switch, voice, a button) gets the follow values once it has settled, about
-2 s after its last report; one turned on at 30 % keeps its 30 %.
+2 s after its last report; one turned on at 30 % keeps its 30 %. A button that runs its
+scene through [`layers.set_base`](#buttons-that-go-through-layers-layersset_base) gets
+both at once.
 
 ### Signals that stay: `strength`
 
@@ -263,6 +265,34 @@ data: {layer: bins, priority: 70, xy_color: [0.6, 0.38], brightness: 255,
   everything.
 - `layer: all` and `layer: active` never remove a sticky or locked layer: only its own
   id does.
+
+### Buttons that go through Layers: `layers.set_base`
+
+A scene that reaches a managed light directly is something Layers only sees afterwards.
+So the light shows the scene first and what its layers add second: a light with a follow
+layer comes on at the scene's brightness and then glides to the follow colour, and one
+under a sticky signal flashes the scene for a couple of seconds before the signal comes
+back.
+
+For the buttons where that matters, call `layers.set_base` instead of `scene.turn_on`:
+
+```yaml
+action: layers.set_base
+target: {entity_id: scene.evening}
+```
+
+The layers react exactly as they would to the scene itself (a soft layer is taken back,
+a sticky one stays, a follow layer stops following only what the scene names). But each
+managed light gets one command, already combining the scene with its layers: the scene's
+brightness with the follow colour, nothing at all under a sticky signal that covers it.
+Layers checks that command arrived and retries it, as it does for its own. Anything in
+the scene that Layers doesn't manage is passed on to Home Assistant's scene. You can also
+give the states inline, in `scene.apply`'s format, with `entities:`.
+
+- A scene saved in the scene editor names a colour for each light, so that colour stops
+  following. To keep a follow layer's colour, leave the colour out of the scene.
+- A vendor scene (one the bridge runs) can't be read, so it is passed on as it is.
+- Wall switches, voice and the app still reach lights directly; nothing changes for them.
 
 ## Thermostats
 
@@ -377,6 +407,7 @@ or expect a manual layer when they act.
 | Action | What it does |
 |---|---|
 | `layers.set` | Put a layer on lights, or update it. |
+| `layers.set_base` | Run a scene through Layers: it becomes the base, and each light gets what it should show in one command. |
 | `layers.clear` | Remove a layer. Without a target, it's removed from every light. `layer: active` (the top one) and `layer: all` need a target. |
 | `layers.sync` | Send every managed light what it should show now, for example after watch-only mode. |
 | `layers.get` | Returns each light's or thermostat's base, layers and current command, for debugging. |

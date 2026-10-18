@@ -385,6 +385,47 @@ their own do not set it).
 - `record_observed_as_base(rec, obs, caps, now, source)`: `base =
   observed_to_command(obs, caps)`.
 
+### 5.6 `layers.set_base`: a scene through Layers
+
+"The base is now this scene", for each lamp a scene names. Reasoning in
+[set-base.md](set-base.md). The engine (`Engine.set_base`) composes it from 5.3,
+so the layers react as they would to the same scene reaching the lamp directly;
+only what reaches the lamp, and when, differs.
+
+- **Reading the scene.** `scenes.read_scenes` (the scenes the target names, later
+  ones winning per member) or `scenes.apply_states` (`entities`, as `scene.apply`
+  reads it). For each enrolled member, `reproduced_call` and `normalise_call` give
+  the command and its groups, exactly as for a member a scene skips (7.1).
+- **Passed on**, under the caller's context: members that are not enrolled, and
+  enrolled members whose call has no known intent (`effect`, `white`,
+  `rgbw_color`, ...), to `scene.apply`; targeted scenes with no members Layers can
+  read (a vendor scene), to `scene.turn_on`. The listeners then see them as for any
+  scene. A member whose state Home Assistant's scene would send nothing for is
+  dropped.
+- **Per lamp**, in order: a pending debounce is judged (7.1); a lamp with no base
+  and no layer learns what it shows (as for `layers.set`, 2); then
+  `apply_external(rec, command, groups, source, policy, now, user_id, caps,
+  chosen=groups & {brightness, color}, scope=room)`, with `source` `user` when the
+  call carries a `user_id`, else `automation`. The lamp's `diverged` is then put
+  back as it was: the policy judged a lamp that has not been sent anything. A
+  pending hold re-show and follow-on render are cancelled; `layers_external` fires
+  as in 5.3.
+- **Sent:** `_render(reason="set_base")`, with the call's `transition` and the
+  caller's context as parent, whether or not the effective command changed (7.3 a).
+  So a lamp under a sticky or locked layer that covers it gets nothing, and one
+  whose follow layer gives a colour gets the scene's brightness with that colour,
+  in one command. A held divergence of the sync-only kind is cleared, as for any
+  targeted call.
+- **Gap fill.** When a `set_base` render is verified, a brightness or colour that
+  the base (on) and the effective command both lack, and the lamp reports, is
+  merged into the base (decision `base_learned`): it was the lamp's own choice (a
+  lamp turned on from off by a scene naming only its brightness). The late
+  re-check then checks the filled command, which the lamp shows.
+- `last_layers_change` is not set, as for any change through 5.3.
+- **Permissions.** A call with a `user_id` of a non-admin user is refused
+  (`Unauthorized`) before anything changes unless that user may control every
+  targeted scene, every lamp Layers sends to and every member passed on.
+
 ## 6. Classifier (`logic/classify.py`)
 
 Pure functions over a `Record`, the incoming event, and a `Runtime` snapshot the
@@ -729,7 +770,8 @@ Assistant as an automation running a scene, the same as a motion sensor, so
 
 Only:
 (a) a `layers.set`/`clear` changes a lamp's effective command, or repairs a
-    `delivery`/`partial`/`colour` divergence on a lamp it targets;
+    `delivery`/`partial`/`colour` divergence on a lamp it targets; or a
+    `layers.set_base` names the lamp (5.6);
 (b) `layers.sync`;
 (c) an expiry `expire()` allows (the safety rule, `on_expire: render`, or a
     clear of a layer that had already run out, 5.2);
@@ -835,13 +877,16 @@ Turning it on sends nothing; `layers.sync` pushes.
 | `layers.set` | target (entity/group); `layer`; `priority` (1–99); `mode`; `state`; `brightness` \| `brightness_pct`; one of `color_temp_kelvin`, `xy_color`, `hs_color`, `rgb_color`; `transition`; `ttl` \| `until`; `resume_after_manual`; `on_expire`; `only_if_present`; `owner`; `strength` (`soft` / `sticky` / `locked`; named layers only, never on a follow layer); `source`, `manual_timeout` (`mode: follow` only, which takes no `state`, brightness or colour) |
 | `layers.set` on `climate.*` | as above, with `hvac_mode`, `temperature`, `preset_mode`, and `offset` (`mode: adjust` only, which takes nothing else); `state`, brightness, colour and `mode: follow` do not apply (section 8) |
 | `layers.clear` | optional target; `layer` (id, `active`, `all` — `active` and `all` need a target; `base` is refused); `transition` |
+| `layers.set_base` | target: scenes, or `entities` (as `scene.apply`), not both; `transition` |
 | `layers.sync` | optional target |
 | `layers.get` | optional target; response only |
 
 `set`/`clear`/`sync` return (when asked) a per-lamp result: `queued`,
 `unchanged`, `in_sync`, `pending`, `shadow`, `skipped_tombstoned`,
 `skipped_absent`, `skipped_not_enrolled`. Lamps that are not enrolled are
-skipped and reported, never raised on.
+skipped and reported, never raised on. `set_base` returns the same per-lamp
+results under `entities`, and `passed_on`: the members and scenes it handed to
+Home Assistant's scene (5.6).
 
 ### 7.7 Entities and diagnostics
 

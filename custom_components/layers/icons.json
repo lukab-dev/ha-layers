@@ -23,6 +23,9 @@
     "set": {
       "service": "mdi:layers-plus"
     },
+    "set_base": {
+      "service": "mdi:palette-swatch-variant"
+    },
     "clear": {
       "service": "mdi:layers-minus"
     },

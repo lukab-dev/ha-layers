@@ -241,7 +241,7 @@ class Renderer:
             # A render of part of the command says nothing about the rest of it.
             rec.diverged = None
         ir.async_delete_issue(self.hass, DOMAIN, f"render_failed_{job.entity_id}")
-        self.engine.render_succeeded(job.entity_id)
+        job = self.engine.render_succeeded(job)
         self.engine.save()
         if platform in LATE_WINDOW_S:
             self._schedule_late(job)

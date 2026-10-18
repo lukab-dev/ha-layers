@@ -58,12 +58,34 @@ def scene_targets(
     """What a ``scene.turn_on`` or ``scene.apply`` call wants of each enrolled lamp."""
     enrolled = set(enrolled)
     if service == "apply":
-        wanted = _apply_states(data.get(CONF_ENTITIES))
+        wanted = apply_states(data.get(CONF_ENTITIES))
     else:
-        wanted = {}
-        for scene in _scene_entities(hass, data):
-            wanted.update(_members(scene))
+        wanted, _found, _unread = read_scenes(hass, data)
     return {eid: state for eid, state in wanted.items() if eid in enrolled}
+
+
+def read_scenes(
+    hass: HomeAssistant, data: Mapping[str, Any]
+) -> tuple[dict[str, State], list[str], list[str]]:
+    """The scenes a call targets: what they want of every member (later scenes win),
+    the ids of all of them, and the ids of those Layers cannot read (a vendor scene
+    lists no members)."""
+    wanted: dict[str, State] = {}
+    found: list[str] = []
+    unread: list[str] = []
+    for scene in _scene_entities(hass, data):
+        found.append(scene.entity_id)
+        members = _members(scene)
+        if members:
+            wanted.update(members)
+        else:
+            unread.append(scene.entity_id)
+    return wanted, found, unread
+
+
+def as_apply_entities(states: Mapping[str, State]) -> dict[str, dict[str, Any]]:
+    """States as ``scene.apply`` takes them: ``state`` plus the attributes."""
+    return {eid: {"state": state.state, **state.attributes} for eid, state in states.items()}
 
 
 def reproduced_call(state: State) -> tuple[str, dict[str, Any]] | None:
@@ -128,7 +150,7 @@ def _members(scene: Any) -> dict[str, State]:
     return {eid: state for eid, state in states.items() if isinstance(state, State)}
 
 
-def _apply_states(entities: Any) -> dict[str, State]:
+def apply_states(entities: Any) -> dict[str, State]:
     """``scene.apply``'s ``entities``, as its schema reads them: a state, or a dict of
     ``state`` plus attributes (YAML's ``on``/``off`` arrive as booleans)."""
     if not isinstance(entities, Mapping):

@@ -12,13 +12,15 @@ from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 
+from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.const import ATTR_ENTITY_ID, ENTITY_MATCH_ALL
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, State, SupportsResponse
+from homeassistant.exceptions import ServiceValidationError, Unauthorized, UnknownUser
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ATTR_ENTITIES,
     ATTR_HVAC_MODE,
     ATTR_LAYER,
     ATTR_MANUAL_TIMEOUT,
@@ -45,6 +47,7 @@ from .const import (
     SERVICE_CLEAR,
     SERVICE_GET,
     SERVICE_SET,
+    SERVICE_SET_BASE,
     SERVICE_SYNC,
 )
 from .logic.climate import HVAC_MODES, ClimateCommand, ClimateSetRequest
@@ -60,6 +63,8 @@ from .logic.model import (
     ON,
     ON_EXPIRE_CHOICES,
     ON_EXPIRE_SAFE,
+    SRC_AUTOMATION,
+    SRC_USER,
     STRENGTH_SOFT,
     STRENGTHS,
     Color,
@@ -67,7 +72,8 @@ from .logic.model import (
     SetRequest,
 )
 from .logic.policy import PolicyError
-from .targets import service_targets
+from . import scenes
+from .targets import normalise_call, service_targets
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -195,6 +201,26 @@ CLEAR_SCHEMA = vol.Schema(
     }
 )
 TARGET_ONLY_SCHEMA = vol.Schema({**cv.ENTITY_SERVICE_FIELDS})
+
+
+def _one_scene(data: dict[str, Any]) -> dict[str, Any]:
+    if (ATTR_ENTITIES in data) == _has_target(data):
+        raise vol.Invalid("give either scenes as the target or 'entities', not both")
+    return data
+
+
+SET_BASE_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            **cv.ENTITY_SERVICE_FIELDS,
+            # Read the way scene.apply reads it (scenes.apply_states); members it
+            # cannot read are left out, as scene.apply would refuse them.
+            vol.Optional(ATTR_ENTITIES): vol.All(dict, vol.Length(min=1)),
+            vol.Optional(ATTR_TRANSITION): vol.All(vol.Coerce(float), vol.Range(0, 300)),
+        }
+    ),
+    _one_scene,
+)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -370,6 +396,83 @@ def _set_lamps(call: ServiceCall, engine: Engine, data: dict[str, Any],
                             parent_id=call.context.id)
 
 
+def _scene_intent(hass: HomeAssistant, state: State) -> tuple[Command, frozenset[str]] | None:
+    """The command a scene's state gives its lamp, read as the call Home Assistant's
+    scene would send it (SPEC 7.1); ``None`` when the intent cannot be known."""
+    reproduced = scenes.reproduced_call(state)
+    if reproduced is None:
+        return None
+    service, data = reproduced
+    _lamps, _via, intent, groups = normalise_call(
+        hass, {ATTR_ENTITY_ID: state.entity_id, **data}, service, {state.entity_id}
+    )
+    return (intent, groups) if intent is not None else None
+
+
+async def _check_allowed(call: ServiceCall, entity_ids: list[str]) -> None:
+    """A person's set_base reaches only what Home Assistant would let them change
+    through the scene: each scene and each lamp Layers sends on their behalf."""
+    if not call.context.user_id:
+        return
+    user = await call.hass.auth.async_get_user(call.context.user_id)
+    if user is None:
+        raise UnknownUser(context=call.context, permission=POLICY_CONTROL)
+    if user.is_admin:
+        return
+    for eid in entity_ids:
+        if not user.permissions.check_entity(eid, POLICY_CONTROL):
+            raise Unauthorized(context=call.context, entity_id=eid, permission=POLICY_CONTROL)
+
+
+async def _async_set_base(call: ServiceCall) -> ServiceResponse:
+    """SPEC 5.6: a scene through Layers. The lamps Layers manages get their new base
+    and, at once, their effective command; everything else in the scene is passed on
+    to Home Assistant's scene, under the caller's context."""
+    hass = call.hass
+    engine = _engine(hass)
+    data = dict(call.data)
+    transition = data.get(ATTR_TRANSITION)
+    if ATTR_ENTITIES in data:
+        wanted, found, unread = scenes.apply_states(data[ATTR_ENTITIES]), [], []
+        if not wanted:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_request",
+                translation_placeholders={"reason": "'entities' names no entity and state"},
+            )
+    else:
+        wanted, found, unread = scenes.read_scenes(hass, data)
+        if not found:
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_scenes")
+    routed: dict[str, tuple[Command, frozenset[str]]] = {}
+    passed: dict[str, State] = {}
+    for eid, state in wanted.items():
+        intent = _scene_intent(hass, state) if eid in engine.enrolled else None
+        if intent is not None:
+            routed[eid] = intent
+        elif eid not in engine.enrolled or scenes.reproduced_call(state) is not None:
+            passed[eid] = state     # not Layers' lamp, or an intent only the lamp can tell
+    await _check_allowed(call, [*found, *sorted(routed), *sorted(passed)])
+    results = engine.set_base(
+        routed, source=SRC_USER if call.context.user_id else SRC_AUTOMATION,
+        user_id=call.context.user_id, transition=transition, parent_id=call.context.id,
+    )
+    extra = {ATTR_TRANSITION: transition} if transition is not None else {}
+    if passed:
+        await hass.services.async_call(
+            scenes.SCENE_DOMAIN, "apply",
+            {ATTR_ENTITIES: scenes.as_apply_entities(passed), **extra},
+            blocking=True, context=call.context,
+        )
+    if unread:
+        await hass.services.async_call(
+            scenes.SCENE_DOMAIN, "turn_on", {ATTR_ENTITY_ID: unread, **extra},
+            blocking=True, context=call.context,
+        )
+    if not call.return_response:
+        return None
+    return {"entities": results, "passed_on": sorted([*passed, *unread])}
+
+
 async def _async_clear(call: ServiceCall) -> ServiceResponse:
     engine = _engine(call.hass)
     data = dict(call.data)
@@ -419,6 +522,8 @@ def async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, SERVICE_SET, _async_set, SET_SCHEMA,
                                  supports_response=SupportsResponse.OPTIONAL)
     hass.services.async_register(DOMAIN, SERVICE_CLEAR, _async_clear, CLEAR_SCHEMA,
+                                 supports_response=SupportsResponse.OPTIONAL)
+    hass.services.async_register(DOMAIN, SERVICE_SET_BASE, _async_set_base, SET_BASE_SCHEMA,
                                  supports_response=SupportsResponse.OPTIONAL)
     hass.services.async_register(DOMAIN, SERVICE_SYNC, _async_sync, TARGET_ONLY_SCHEMA,
                                  supports_response=SupportsResponse.OPTIONAL)

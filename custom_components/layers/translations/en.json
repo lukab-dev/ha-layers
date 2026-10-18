@@ -100,6 +100,9 @@
     },
     "no_targets": {
       "message": "None of the targets is a lamp Layers manages."
+    },
+    "no_scenes": {
+      "message": "None of the targets is a scene."
     }
   },
   "services": {
@@ -202,6 +205,20 @@
         "offset": {
           "name": "Offset",
           "description": "Climate entities, mode: adjust only: added to the temperature below (-2 is two degrees lower), only while the thermostat is not off."
+        }
+      }
+    },
+    "set_base": {
+      "name": "Set base from scene",
+      "description": "Run a scene through Layers: the scene becomes the base of each managed lamp, and each lamp gets what it should show with its layers in one command. Members Layers does not manage are passed on to the scene.",
+      "fields": {
+        "entities": {
+          "name": "Entities",
+          "description": "Instead of a scene: entities and their states, as for `scene.apply`."
+        },
+        "transition": {
+          "name": "Transition",
+          "description": "Seconds, if the lamp supports it."
         }
       }
     },

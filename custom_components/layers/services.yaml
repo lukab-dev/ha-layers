@@ -144,6 +144,25 @@ set:
           step: 0.5
           mode: box
 
+set_base:
+  target:
+    entity:
+      domain:
+        - scene
+  fields:
+    entities:
+      example: '{"light.lamp_a": {"state": "on", "brightness": 255}}'
+      selector:
+        object:
+    transition:
+      selector:
+        number:
+          min: 0
+          max: 300
+          step: 0.5
+          unit_of_measurement: seconds
+          mode: box
+
 clear:
   target:
     entity:

@@ -36,6 +36,7 @@ SERVICE_SET: Final = "set"
 SERVICE_CLEAR: Final = "clear"
 SERVICE_SYNC: Final = "sync"
 SERVICE_GET: Final = "get"
+SERVICE_SET_BASE: Final = "set_base"
 
 # Service fields
 ATTR_LAYER: Final = "layer"
@@ -55,6 +56,7 @@ ATTR_HVAC_MODE: Final = "hvac_mode"
 ATTR_TEMPERATURE: Final = "temperature"
 ATTR_PRESET_MODE: Final = "preset_mode"
 ATTR_OFFSET: Final = "offset"
+ATTR_ENTITIES: Final = "entities"     # layers.set_base: scene.apply's format
 
 # Events
 EVENT_RENDER: Final = "layers_render"
