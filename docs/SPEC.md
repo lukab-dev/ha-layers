@@ -749,7 +749,15 @@ Only:
 (i) after an external change on any path, a lamp that is on, has a live follow
     layer and does not show its effective command gets it: a lamp switched on by
     hand comes on at its power-on level, and the follow values it did not choose
-    are sent. Never an on or off: the on/off is what the person just did.
+    are sent. Never an on or off: the on/off is what the person just did. Sent
+    `FOLLOW_SETTLE_S` (2 s) after the last report of the change, not on its first:
+    every further report of it (its context, a `FOLLOW_UP`, a judged debounce)
+    restarts the wait, and the lamp is judged again when it ends. A lamp that
+    fades (Matter) first reports "on" at its old level, and the base learns the
+    level the change asked for only from the reports that follow; a render on the
+    first report would send the old level back with the follow colour and stop the
+    fade there. (Sending only the follow layer's groups would not do: the base
+    would keep the old level, and the next (h) sends the whole effective command.)
 (j) `HOLD_SETTLE_S` (2 s) after the last report of a change that went under a
     `sticky` or `locked` layer (5.3), the effective command, once: every further
     report of the change restarts the wait, so a scene's own command reaches the

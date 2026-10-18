@@ -654,6 +654,11 @@ SETTLE_S = 2.0              # wait after a command before verifying
 # lamp is re-shown at most HOLD_CAP times in HOLD_CAP_WINDOW_S - past that it keeps what
 # it shows and counts as failed, so a bulb that keeps reverting is not fought forever.
 HOLD_SETTLE_S = 2.0
+# Follow values after a change Layers did not make (SPEC 7.3 i) go out FOLLOW_SETTLE_S
+# after the last report of that change. A Matter lamp turned on from off reports "on"
+# at its old level first and fades up in further reports; the base learns the level it
+# ends at only from those, and a render on the first report sent the old level back.
+FOLLOW_SETTLE_S = 2.0
 HOLD_CAP = 5
 HOLD_CAP_WINDOW_S = 60.0
 SLOW_OFF_S = 15.0           # Hue can report an optimistic off and correct it ~10 s later

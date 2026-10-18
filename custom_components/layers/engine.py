@@ -81,6 +81,7 @@ from .logic.model import (
     DIV_MANUAL_KEEP,
     DIV_REPAIRED_BY_TARGETED_CALL,
     DIV_UNSYNCED,
+    FOLLOW_SETTLE_S,
     GROUP_BRIGHTNESS,
     GROUP_COLOR,
     HOLD_CAP,
@@ -737,6 +738,7 @@ class Engine:
         if rec.available:
             rec.p_at_drop = None    # it describes a lamp from before this change
         self._cancel("replay", eid)
+        self._cancel("follow_on", eid)
         self.renderer.cancel(eid)
 
     def _external(self, rec: Record, verdict: cl.Verdict, new: Observed | None, caps: Caps,
@@ -1083,19 +1085,38 @@ class Engine:
         """SPEC 7.3 i: after a change Layers did not make, a lamp that is on and has a
         follow layer gets the values that layer gives it (a lamp switched on by hand
         comes on at its power-on level). Never turns a lamp on or off: its on/off is
-        what the person just did."""
+        what the person just did.
+
+        Not on the change's first report: FOLLOW_SETTLE_S after its last one. A lamp
+        that fades (Matter) reports "on" at its old level first; the base learns the
+        level it ends at from the reports that follow, and a render now would send the
+        old level back and stop the fade there. Each report of the change runs through
+        here again (``_supersede`` cancels the wait first), so the wait restarts."""
+        if self._follow_due(rec, now):
+            self._later("follow_on", rec.entity_id, FOLLOW_SETTLE_S, self._follow_settled)
+
+    @callback
+    def _follow_settled(self, eid: str) -> None:
+        rec = self.records.get(eid)
+        if rec is None:
+            return
+        now = self.now()
+        if self._follow_due(rec, now):
+            self._decision(eid, "follow_on")
+            self._follow_render(rec, now)
+
+    def _follow_due(self, rec: Record, now: float) -> bool:
+        """The lamp is on, has a live follow layer, and does not show its effective
+        command."""
         obs = rec.observed
         if obs is None or obs.state != ON or not _following(rec, now):
-            return
+            return False
         effective = resolve(rec, now).command
         if effective is None or not effective.is_on:
-            return
+            return False
         caps = self.caps(rec.entity_id)
         call = project(effective, caps)
-        if call is None or matches(obs, call, caps) == MATCH_YES:
-            return
-        self._decision(rec.entity_id, "follow_on")
-        self._follow_render(rec, now)
+        return call is not None and matches(obs, call, caps) != MATCH_YES
 
     def _follow_render(self, rec: Record, now: float) -> None:
         """Send a lamp its follow values (SPEC 7.3 h and i): never during the startup

@@ -221,8 +221,8 @@ per light:
 stops following: dim a light by hand and its brightness stays where you put it while its
 colour keeps adapting. It follows again once the light is turned off, or after
 `manual_timeout` if the layer sets one. A light switched on without a brightness or
-colour (a wall switch, voice, a button) gets the follow values straight away; one turned
-on at 30 % keeps its 30 %.
+colour (a wall switch, voice, a button) gets the follow values once it has settled, about
+2 s after its last report; one turned on at 30 % keeps its 30 %.
 
 ### Signals that stay: `strength`
 
