@@ -242,6 +242,10 @@ async def test_options_saving_reloads_the_entry(hass: HomeAssistant, lights: dic
         CONF_EDIT_ACTIVE: [B],
         CONF_BASE_KEEP: [],
         CONF_REASSERT: [],
+        # Climate defaults, saved with every options flow.
+        "climate_manual_priority": 80,
+        "climate_manual_timeout": 180,
+        "climate_report_window": 30,
     }
     assert entry.state is ConfigEntryState.LOADED
     engine = entry.runtime_data.engine

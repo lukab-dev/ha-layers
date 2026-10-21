@@ -8,8 +8,11 @@ DOMAIN: Final = "layers"
 
 # What can be enrolled. A light is the full model; a switch is a lamp that only does
 # on/off (no colour modes, so brightness and colour are projected away). Groups of
-# either kind are expanded, never enrolled.
-MANAGED_DOMAINS: Final = frozenset({"light", "switch"})
+# either kind are expanded, never enrolled. A climate entity has its own model
+# (logic/climate.py) and its own manager (climate_engine.py).
+LAMP_DOMAINS: Final = frozenset({"light", "switch"})
+CLIMATE_DOMAIN: Final = "climate"
+MANAGED_DOMAINS: Final = LAMP_DOMAINS | {CLIMATE_DOMAIN}
 
 STORAGE_KEY: Final = "layers.state"
 STORAGE_VERSION: Final = 1
@@ -21,6 +24,12 @@ CONF_DEFAULT_POLICY: Final = "default_policy"
 CONF_EDIT_ACTIVE: Final = "edit_active_entities"
 CONF_BASE_KEEP: Final = "base_keep_layers_entities"
 CONF_REASSERT: Final = "reassert_entities"
+# Climate: a change Layers did not make becomes the `manual` layer at this priority,
+# for this many minutes (0: until cleared); a report with no context this many
+# seconds after Layers' own command is still the device answering.
+CONF_CLIMATE_MANUAL_PRIORITY: Final = "climate_manual_priority"
+CONF_CLIMATE_MANUAL_TIMEOUT: Final = "climate_manual_timeout"
+CONF_CLIMATE_REPORT_WINDOW: Final = "climate_report_window"
 
 # Services
 SERVICE_SET: Final = "set"
@@ -42,6 +51,10 @@ ATTR_OWNER: Final = "owner"
 ATTR_SOURCE: Final = "source"
 ATTR_MANUAL_TIMEOUT: Final = "manual_timeout"
 ATTR_STRENGTH: Final = "strength"
+ATTR_HVAC_MODE: Final = "hvac_mode"
+ATTR_TEMPERATURE: Final = "temperature"
+ATTR_PRESET_MODE: Final = "preset_mode"
+ATTR_OFFSET: Final = "offset"
 
 # Events
 EVENT_RENDER: Final = "layers_render"

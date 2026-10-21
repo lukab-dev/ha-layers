@@ -39,6 +39,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CLIMATE_DOMAIN,
     CONF_BASE_KEEP,
     CONF_DEFAULT_POLICY,
     CONF_EDIT_ACTIVE,
@@ -47,7 +48,7 @@ from .const import (
     DECISION_BUFFER,
     DOMAIN,
     EVENT_EXTERNAL,
-    MANAGED_DOMAINS,
+    LAMP_DOMAINS,
     RESULT_IN_SYNC,
     RESULT_PENDING,
     RESULT_QUEUED,
@@ -112,6 +113,7 @@ from .logic.model import (
 from .logic.resolve import resolve, resolve_without_follow
 from .render import Renderer, RenderJob
 from . import scenes
+from .climate_engine import ClimateManager
 from .store import LayersStore
 from .targets import normalise_call
 
@@ -135,7 +137,7 @@ DIV_SYNC_ONLY = frozenset({DIV_MANUAL_KEEP, DIV_UNSYNCED})
 
 @callback
 def _light_call_filter(event_data: dict[str, Any]) -> bool:
-    return event_data.get("domain") in MANAGED_DOMAINS and event_data.get("service") in LIGHT_SERVICES
+    return event_data.get("domain") in LAMP_DOMAINS and event_data.get("service") in LIGHT_SERVICES
 
 
 @callback
@@ -203,7 +205,9 @@ class Engine:
         self.entry = entry
         self.store = LayersStore(hass)
         opts = entry.options
-        self.enrolled: set[str] = set(opts.get(CONF_ENTITIES, []))
+        entities: list[str] = opts.get(CONF_ENTITIES, [])
+        # Lamps (lights and switches) live here; thermostats in self.climate.
+        self.enrolled: set[str] = {e for e in entities if e.split(".", 1)[0] != CLIMATE_DOMAIN}
         self.default_policy: str = opts.get(CONF_DEFAULT_POLICY, POLICY_TAKE_BACK)
         self.edit_active: set[str] = set(opts.get(CONF_EDIT_ACTIVE, []))
         self.base_keep: set[str] = set(opts.get(CONF_BASE_KEEP, []))
@@ -235,6 +239,14 @@ class Engine:
         self._save_due: float | None = None
         self._setup_before_start = hass.state is not CoreState.running
         self._stopping = False
+        self.climate = ClimateManager(
+            self, {e for e in entities if e.split(".", 1)[0] == CLIMATE_DOMAIN}, dict(opts)
+        )
+
+    @property
+    def all_enrolled(self) -> set[str]:
+        """Every enrolled entity: lamps and thermostats."""
+        return self.enrolled | self.climate.enrolled
 
     # ================================================================ lifecycle
 
@@ -261,8 +273,10 @@ class Engine:
             reg_entry = registry.async_get(eid)
             self._platforms[eid] = reg_entry.platform if reg_entry else ""
             self._read_sources(rec)
+        self.climate.load(data.get("climate", {}), now)
         self._take_over_ours()
         self._track_sources()
+        self.climate.start()
         if self.enrolled:
             self._unsubs.append(
                 async_track_state_change_event(self.hass, sorted(self.enrolled), self._on_state)
@@ -292,6 +306,7 @@ class Engine:
             self._ttl_unsub()
             self._ttl_unsub = None
         self.renderer.cancel_all()
+        self.climate.cancel_all()
 
     @callback
     def _on_hass_stop(self, _event: Event) -> None:
@@ -305,6 +320,7 @@ class Engine:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
+        self.climate.stop()
         if self._source_unsub:
             self._source_unsub()
             self._source_unsub = None
@@ -329,7 +345,7 @@ class Engine:
         )
         now = self.now()
         for eid, ours in handed.items():
-            if eid not in self.records:
+            if eid not in self.records and eid not in self.climate.records:
                 continue
             for context_id, ours_cmd in ours.items():
                 if now - ours_cmd.at <= OURS_KEEP_S:
@@ -357,6 +373,7 @@ class Engine:
                 except Exception:  # noqa: BLE001 — one lamp must not stop the others
                     _LOGGER.exception("layers: could not reconcile %s at the end of the grace", eid)
                     self._mark_untrusted(eid)
+            self.climate.end_grace()
         finally:
             self._schedule_ttl()
             self.save()
@@ -451,7 +468,7 @@ class Engine:
         return self.default_policy
 
     def holds_layers(self, eid: str) -> bool:
-        rec = self.records.get(eid)
+        rec = self.records.get(eid) or self.climate.records.get(eid)
         return bool(rec and rec.layers)
 
     def next_seq(self) -> int:
@@ -554,6 +571,7 @@ class Engine:
             "entities": {
                 eid: rec.to_json() for eid, rec in self.records.items() if rec.worth_persisting()
             },
+            "climate": self.climate.data_to_save(),
         }
 
     def _data_for_store(self) -> dict[str, Any]:
@@ -582,20 +600,23 @@ class Engine:
 
     @callback
     def _renamed_lamp(self, event_data: dict[str, Any]) -> bool:
-        return event_data.get("action") == "update" and event_data.get("old_entity_id") in self.enrolled
+        return event_data.get("action") == "update" and event_data.get("old_entity_id") in self.all_enrolled
 
     @callback
     def _on_registry_update(self, event: Event) -> None:
         """An enrolled lamp was renamed: its record and options follow it, then reload."""
         old, new = event.data["old_entity_id"], event.data["entity_id"]
         _LOGGER.info("layers: %s was renamed to %s; following it", old, new)
-        rec = self.records.pop(old, None)
-        if rec is not None:
-            rec.entity_id = new
-            self.records[new] = rec
-        self.renderer.cancel(old)
-        self.enrolled.discard(old)
-        self.enrolled.add(new)
+        if old in self.climate.enrolled:
+            self.climate.rename(old, new)
+        else:
+            rec = self.records.pop(old, None)
+            if rec is not None:
+                rec.entity_id = new
+                self.records[new] = rec
+            self.renderer.cancel(old)
+            self.enrolled.discard(old)
+            self.enrolled.add(new)
         self._platforms[new] = self._platforms.pop(old, "")
         options = dict(self.entry.options)
         for key in (CONF_ENTITIES, CONF_EDIT_ACTIVE, CONF_BASE_KEEP, CONF_REASSERT):
@@ -1262,6 +1283,8 @@ class Engine:
             self.renderer.cancel(eid)
             rec.diverged = DIV_UNSYNCED
             rec.owed = None             # SPEC 7.5: with Apply off a lamp owes nothing
+            self._decision(eid, "shadow", reason=reason, layer=res.active,
+                           call={"service": call.service, **call.as_dict()})
             self.notify()
             return RESULT_SHADOW
         if not deferred and rec.diverged in DIV_SYNC_ONLY:
@@ -1490,6 +1513,13 @@ class Engine:
         return results
 
     def describe(self, lamps: list[str] | None = None) -> dict[str, Any]:
+        """Lamps and thermostats, by entity id (``layers.get``, diagnostics)."""
+        out = self._describe_lamps(None if lamps is None else [e for e in lamps if e in self.records])
+        out.update(self.climate.describe(
+            None if lamps is None else [e for e in lamps if e in self.climate.records]))
+        return dict(sorted(out.items()))
+
+    def _describe_lamps(self, lamps: list[str] | None) -> dict[str, Any]:
         now = self.now()
         out: dict[str, Any] = {}
         for eid in lamps if lamps is not None else sorted(self.records):
@@ -1540,6 +1570,7 @@ class Engine:
                     rec.diverged = DIV_UNSYNCED
                     rec.owed = None
             self.renderer.cancel_all()
+        self.climate.on_apply(on)
         await self._save_now()
         self.notify()
 
@@ -1560,10 +1591,16 @@ class Engine:
             for eid, rec in self.records.items()
             if rec.owed is not None and not self._stale(rec, now)
         }
+        climate = self.climate.status()
+        failed = sorted([*failed, *climate["failed"]])
+        pending.update(climate["pending_since"])
         attrs = {"failed": failed, "pending_since": pending,
                  "lamps": len(self.records),
-                 "layered": sorted(e for e, r in self.records.items() if r.layers),
-                 "untrusted": sorted(e for e, r in self.records.items() if r.untrusted)}
+                 "climate": len(self.climate.records),
+                 "layered": sorted([*(e for e, r in self.records.items() if r.layers),
+                                    *climate["layered"]]),
+                 "untrusted": sorted([*(e for e, r in self.records.items() if r.untrusted),
+                                      *climate["untrusted"]])}
         if not self.apply:
             return STATUS_SHADOW, attrs
         if failed:

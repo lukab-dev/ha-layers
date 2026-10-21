@@ -29,7 +29,7 @@ class StatusSensor(SensorEntity):
     _attr_options = [STATUS_OK, STATUS_PENDING, STATUS_FAILED, STATUS_SHADOW]
     # The lamp lists change often and say nothing the logbook doesn't; keep them
     # out of the recorder.
-    _unrecorded_attributes = frozenset({"pending_since", "layered", "lamps"})
+    _unrecorded_attributes = frozenset({"pending_since", "layered", "lamps", "climate"})
 
     def __init__(self, entry: LayersConfigEntry) -> None:
         self._engine: Engine = entry.runtime_data.engine

@@ -46,7 +46,8 @@ can go stale.
    your `config/custom_components/` folder.
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & services → Add integration → Layers** and pick the lights
-   it should manage. Switches (smart plugs, relays) work too, as on/off lights.
+   it should manage. Switches (smart plugs, relays) work too, as on/off lights, and so
+   do thermostats (`climate` entities, see [Thermostats](#thermostats)).
 
 Needs Home Assistant 2026.7 or newer.
 
@@ -263,6 +264,108 @@ data: {layer: bins, priority: 70, xy_color: [0.6, 0.38], brightness: 255,
 - `layer: all` and `layer: active` never remove a sticky or locked layer: only its own
   id does.
 
+## Thermostats
+
+Layers also manages `climate` entities. The model is the same (a base, layers on top,
+priorities, timers, strength, watch-only mode), with what a thermostat needs instead of
+brightness and colour.
+
+**What a layer holds:** `hvac_mode`, `temperature` and `preset_mode`, each optional.
+A layer that leaves out `hvac_mode` keeps the mode below it, so it never turns the
+heating on by itself. A temperature and a preset replace each other: a layer that names
+either one replaces both below it, because on most thermostats a preset carries its own
+setpoint. `mode: adjust` takes an `offset` in the thermostat's unit ("2 degrees lower"),
+shifts whatever temperature is below it, does nothing while the thermostat is off, and
+several offsets add up.
+
+```yaml
+# Your schedule sets the base: what the thermostat does when nothing is layered on it
+action: layers.set
+target: {entity_id: climate.lounge}
+data: {layer: base, hvac_mode: heat, temperature: 21}
+```
+
+```yaml
+# Nobody home: two degrees lower
+action: layers.set
+target: {entity_id: [climate.lounge, climate.study]}
+data: {layer: away, priority: 50, mode: adjust, offset: -2}
+```
+
+```yaml
+# A window opens: heating off in that room until it closes
+action: layers.set
+target: {entity_id: climate.lounge}
+data: {layer: window, priority: 90, hvac_mode: "off", strength: locked}
+# ...and when it closes:
+action: layers.clear
+target: {entity_id: climate.lounge}
+data: {layer: window}
+```
+
+One call can target lamps and thermostats together (`state: "off"` and
+`temperature: 17` in one `away` layer); each gets the fields it takes.
+
+### When someone changes a thermostat
+
+A change Layers did not make (the dial, the vendor's app, the HA app, voice, another
+automation) never overwrites the base, which is your schedule's. It becomes a layer
+called **`manual`** at a fixed priority (80 by default), which runs out after a while
+(3 hours by default). Both are in the integration's options. So, with the default:
+
+- the person's setting **outranks every layer below 80**: holiday, away, night. Those
+  stay underneath and show again when the manual layer runs out or is cleared
+  (`layers.clear layer: manual`);
+- soft layers at or above 80 are taken back from that thermostat, as on a lamp;
+- **sticky and locked layers above 80 keep showing.** An open window as a locked layer
+  at 90 keeps the heating off while someone turns the dial; their setting goes into the
+  manual layer underneath and comes straight back when the window layer is cleared. If
+  you would rather a person's change beat an open window, give the window layer a
+  priority below the manual one.
+
+### Timers on thermostats
+
+**A layer running out never switches a thermostat on** (from `off` to any other mode).
+If it would, nothing is sent: the thermostat stays off and, if no other layer decides
+the mode, that becomes its base. A setpoint may move either way, so a manual hold or a
+boost running out returns the thermostat to the schedule's temperature.
+
+That means a timer is a safety net, not the normal way to end a layer that turned the
+heating off: clear it (`layers.clear` always restores), or give it
+`on_expire: render`.
+
+### Slow thermostats and checking that a command arrived
+
+Thermostats answer in seconds and round what they are sent, so Layers treats them
+differently from lamps:
+
+- **The report-back window** (30 s by default, in the options). A report with no
+  context inside that window after Layers' own command is the thermostat answering
+  late, never a person: if the thermostat does not show the command when the window
+  ends, it is sent once more. Outside the window, or once the thermostat has shown the
+  command for a few seconds, a change with no context is a person's. On one thermostat
+  bridged over HomeKit, a setpoint read back correct after 2.0-2.1 s.
+- **Enrol the thermostat Layers commands, not a valve that follows it.** A radiator
+  valve that copies its zone thermostat changed about 30 s after it, with no context: a
+  valve enrolled on its own would read that as a person.
+- **Delivery is checked on the mode, the preset and the setpoint.** The mode and the
+  preset must read back exactly; the setpoint within half the thermostat's step, and
+  never less than 0.25 degrees, because thermostats round (21.3 reads back as 21.5).
+  Layers rounds to the step itself when the thermostat reports one. A thermostat that
+  has not reported the command within the window is sent it again, up to three times in
+  all, and then counts as failed on `sensor.layers_status`.
+- A report that only moves the room temperature or `hvac_action` is not a change.
+
+**Watch-only mode** works as for lamps. `layers.get` shows, per thermostat,
+`would_send`: the calls Layers would have made (`climate.set_hvac_mode`,
+`climate.set_preset_mode`, `climate.set_temperature`), and the decision trace in the
+diagnostics download records each one.
+
+**Not covered yet:** thermostats with two setpoints (`target_temp_low`/`high`), fan,
+swing and humidity. Features that make a thermostat change itself, such as the vendor's
+own open-window detection or schedule, look like a person to Layers: switch them off,
+or expect a manual layer when they act.
+
 ## Actions
 
 | Action | What it does |
@@ -270,14 +373,15 @@ data: {layer: bins, priority: 70, xy_color: [0.6, 0.38], brightness: 255,
 | `layers.set` | Put a layer on lights, or update it. |
 | `layers.clear` | Remove a layer. Without a target, it's removed from every light. `layer: active` (the top one) and `layer: all` need a target. |
 | `layers.sync` | Send every managed light what it should show now, for example after watch-only mode. |
-| `layers.get` | Returns each light's base, layers and current command, for debugging. |
+| `layers.get` | Returns each light's or thermostat's base, layers and current command, for debugging. |
 
 `layers.set` options: `layer`, `priority` (needed the first time a layer goes on a
 light), `mode`, `state`, `brightness` / `brightness_pct`, `color_temp_kelvin`,
 `xy_color` / `hs_color` / `rgb_color`, `transition`, `ttl` / `until`, `on_expire`,
 `resume_after_manual`, `only_if_present`, `owner` and `strength`; for `mode: follow`, `source` and
-`manual_timeout` (`transition` is then the transition of each update, 1 s by default).
-The action's UI form describes each one.
+`manual_timeout` (`transition` is then the transition of each update, 1 s by default);
+for thermostats, `hvac_mode`, `temperature`, `preset_mode` and, with `mode: adjust`,
+`offset`. The action's UI form describes each one.
 
 ## Entities
 

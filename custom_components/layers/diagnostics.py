@@ -30,7 +30,7 @@ async def async_get_config_entry_diagnostics(
             "status_attributes": status_attrs,
             "lamps": engine.describe(),
             "stored": engine._data_to_save(),  # noqa: SLF001 — the exact persisted form
-            "in_flight": engine.renderer.in_flight(),
+            "in_flight": {**engine.renderer.in_flight(), **engine.climate.renderer.in_flight()},
             "decisions": list(engine.decisions),
         },
         TO_REDACT,

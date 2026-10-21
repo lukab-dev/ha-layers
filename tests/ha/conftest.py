@@ -31,7 +31,14 @@ from homeassistant.components.light import (
     LightEntity,
     LightEntityFeature,
 )
+from homeassistant.components.climate import (
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
+)
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util import color as color_util
@@ -40,6 +47,7 @@ from pytest_homeassistant_custom_component.common import (
     setup_test_component_platform,
 )
 
+from custom_components.layers import climate_engine as climate_module
 from custom_components.layers import render as render_module
 from custom_components.layers.const import (
     CONF_BASE_KEEP,
@@ -63,6 +71,9 @@ def fast_render(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(render_module, "SLOW_OFF_S", 0.02)
     monkeypatch.setattr(render_module, "LATE_RECHECK_S", 0.05)
     monkeypatch.setattr(render_module, "RETRY_BACKOFF_S", (0.01, 0.01, 0.01, 0.01, 0.01, 0.01))
+    monkeypatch.setattr(climate_module, "SETTLE_S", 0.01)
+    monkeypatch.setattr(climate_module, "POLL_S", 0.01)
+    monkeypatch.setattr(climate_module, "RETRY_BACKOFF_S", (0.01, 0.01))
 
 
 class FakeLamp(LightEntity):
@@ -232,6 +243,99 @@ class FakeSwitch(SwitchEntity):
         self.async_write_ha_state()
 
 
+class FakeThermostat(ClimateEntity):
+    """A zone thermostat: off/heat, three presets, and a setpoint it rounds to 0.5
+    without saying so (no target_temp_step), as a HomeKit-bridged one does.
+
+    ``report_after`` makes it take a command at once and report it N seconds later
+    (still under the caller's context while that is under 5 s, as Home Assistant
+    stamps it); ``ignore_commands`` makes it acknowledge and do nothing.
+    """
+
+    _attr_should_poll = False
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        | ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON
+    )
+
+    def __init__(self, object_id: str, *, mode: HVACMode = HVACMode.HEAT,
+                 temperature: float = 21.0) -> None:
+        self.entity_id = f"climate.{object_id}"
+        self._attr_unique_id = object_id
+        self._attr_name = object_id.replace("_", " ").title()
+        self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
+        self._attr_preset_modes = ["eco", "comfort", "away"]
+        self._attr_hvac_mode = mode
+        self._attr_target_temperature = temperature
+        self._attr_preset_mode = None
+        self._attr_current_temperature = 20.0
+        self._attr_hvac_action = HVACAction.IDLE
+        self.report_after: float | None = None
+        self.ignore_commands = False
+        self.calls: list[tuple[str, dict[str, Any], Context | None]] = []
+
+    async def async_set_temperature(self, **kwargs: Any) -> None:
+        data = {k: v for k, v in kwargs.items() if k != "entity_id"}
+        self.calls.append(("set_temperature", data, self._context))
+        if self.ignore_commands:
+            return
+        if "hvac_mode" in data:
+            self._attr_hvac_mode = data["hvac_mode"]
+        self._attr_target_temperature = round(kwargs[ATTR_TEMPERATURE] * 2) / 2
+        self._attr_preset_mode = None
+        self._report()
+
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        self.calls.append(("set_hvac_mode", {"hvac_mode": hvac_mode}, self._context))
+        if self.ignore_commands:
+            return
+        self._attr_hvac_mode = hvac_mode
+        self._report()
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        self.calls.append(("set_preset_mode", {"preset_mode": preset_mode}, self._context))
+        if self.ignore_commands:
+            return
+        self._attr_preset_mode = preset_mode
+        self._report()
+
+    def _report(self) -> None:
+        if self.report_after is None:
+            self.async_write_ha_state()
+        else:
+            self.hass.loop.call_later(self.report_after, self.async_write_ha_state)
+
+    def push(self, *, context: Context | None = None, **attrs: Any) -> None:
+        """Write the thermostat's state as if the device reported it (no context by default)."""
+        for key, value in attrs.items():
+            setattr(self, f"_attr_{key}", value)
+        self.async_set_context(context or Context())
+        self.async_write_ha_state()
+
+    def set_available(self, available: bool) -> None:
+        self._attr_available = available
+        self.async_set_context(Context())
+        self.async_write_ha_state()
+
+
+@pytest.fixture
+def zones() -> dict[str, FakeThermostat]:
+    return {
+        "a": FakeThermostat("zone_a", temperature=21.0),
+        "b": FakeThermostat("zone_b", mode=HVACMode.OFF, temperature=18.0),
+    }
+
+
+@pytest.fixture
+async def thermostats(hass: HomeAssistant, zones: dict[str, FakeThermostat]) -> dict[str, FakeThermostat]:
+    """The fake thermostats behind the real climate domain."""
+    setup_test_component_platform(hass, "climate", list(zones.values()))
+    assert await async_setup_component(hass, "climate", {"climate": [{"platform": "test"}]})
+    await hass.async_block_till_done()
+    return zones
+
+
 @pytest.fixture
 def plugs() -> dict[str, FakeSwitch]:
     return {
@@ -284,6 +388,7 @@ async def setup_layers(
     reassert: list[str] | None = None,
     apply: bool = True,
     end_grace: bool = True,
+    extra: dict[str, Any] | None = None,
 ) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -295,6 +400,7 @@ async def setup_layers(
             CONF_EDIT_ACTIVE: edit_active or [],
             CONF_BASE_KEEP: base_keep or [],
             CONF_REASSERT: reassert or [],
+            **(extra or {}),
         },
     )
     entry.add_to_hass(hass)

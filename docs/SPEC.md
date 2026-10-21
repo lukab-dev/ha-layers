@@ -816,6 +816,7 @@ Turning it on sends nothing; `layers.sync` pushes.
 | Service | Fields |
 |---|---|
 | `layers.set` | target (entity/group); `layer`; `priority` (1–99); `mode`; `state`; `brightness` \| `brightness_pct`; one of `color_temp_kelvin`, `xy_color`, `hs_color`, `rgb_color`; `transition`; `ttl` \| `until`; `resume_after_manual`; `on_expire`; `only_if_present`; `owner`; `strength` (`soft` / `sticky` / `locked`; named layers only, never on a follow layer); `source`, `manual_timeout` (`mode: follow` only, which takes no `state`, brightness or colour) |
+| `layers.set` on `climate.*` | as above, with `hvac_mode`, `temperature`, `preset_mode`, and `offset` (`mode: adjust` only, which takes nothing else); `state`, brightness, colour and `mode: follow` do not apply (section 8) |
 | `layers.clear` | optional target; `layer` (id, `active`, `all` — `active` and `all` need a target; `base` is refused); `transition` |
 | `layers.sync` | optional target |
 | `layers.get` | optional target; response only |
@@ -838,3 +839,102 @@ skipped and reported, never raised on.
   `edited` and `held`; `dropped` with `scope: lamp` is a sticky signal someone
   dismissed at the lamp. It fires when a layer was dropped, edited or held;
   `logbook.py` describes `layers_render` so Activity shows the layer and owner.
+
+## 8. Climate (`logic/climate.py`, `climate_engine.py`)
+
+Climate entities have their own record (`ClimateRecord`), command and manager. Nothing
+in sections 3 to 7 runs on them, and nothing here runs on lamps. Shared: the services,
+the Apply switch, the Store (`"climate"` beside `"entities"`), the decision trace (each
+entry carries `domain: climate`), the status sensor, `Engine._ours` (and its hand-over
+across a reload), the layer sequence and the events.
+
+### 8.1 Command and fold
+
+`ClimateCommand(hvac_mode, temperature, preset, offset)`, every field optional. Groups:
+`hvac_mode`; `target` (temperature and preset, atomic, like a lamp's colour); `offset`.
+
+Fold, bottom to top, from the base:
+- `set`: a named mode replaces the mode; a named target replaces temperature and preset
+  both. Off keeps the target below in the fold. A set layer is active either way.
+- `adjust`: `temperature += offset`, only while the mode is known and not off and a
+  temperature is known; active only then. Offsets stack.
+- Nothing known: `None` (do nothing). A command without a mode leaves the mode alone.
+
+### 8.2 Projection and verification
+
+`project(cmd, caps)` → `set_hvac_mode`, `set_preset_mode`, `set_temperature`, in that
+order. Off is `set_hvac_mode: off` alone. A mode or preset the entity does not list is
+dropped; a temperature is rounded to `target_temp_step` and clamped to
+`min_temp`/`max_temp`, and dropped without the target-temperature feature. A render skips
+calls the entity already shows.
+
+`matches`: the mode and the preset exactly; the setpoint within `tolerance(caps)` =
+`max(TOL_SETPOINT (0.25), step / 2)`; a setpoint the entity does not report is not
+compared. `close` compares two reports the same way; room temperature and `hvac_action`
+are never compared, and a report that moves only those is `MEASUREMENT` (no decision is
+logged for it).
+
+A render sends under one context, waits `SETTLE_S`, then polls until the entity shows
+the command or the report-back window (`climate_report_window`, default 30 s) ends, and
+retries after `RETRY_BACKOFF_S` = (5, 30) s: three attempts, then `diverged: delivery`,
+a repair issue and `layers_render_failed`. Unavailable during a render: owed, as for
+lamps. Apply off (7.5): nothing is sent, the record is `unsynced`, `would_send` holds
+the calls (shown by `layers.get`) and a `shadow` decision records them; a lamp's
+`shadow` decision records its call too.
+
+### 8.3 Classifier
+
+First match wins: `GONE`, `TRANSPORT_DOWN`/`IGNORE`, `FIRST`, `TRANSPORT_UP`,
+`MEASUREMENT`, `OURS` (our context and each value either at the target or not yet
+moved), then our context on anything else is judged as no context; `EXTERNAL` (a
+remembered `climate.*` call, a `user_id`, a `parent_id`); then with no context:
+`NOISE` (a return settling; our render running and the entity not yet arrived),
+`LATE` (our last command within the window and not arrived), `DEBOUNCE`. Arrived: the
+entity has shown our target for `ARRIVED_HOLD_S` with nothing else since.
+
+`LATE` schedules a check at the end of the window: showing the effective command,
+nothing; otherwise one re-render (`window_failed`), and a second miss is `delivery`.
+`DEBOUNCE` settles after `DEBOUNCE_S`: `REREPORT` when close to the report before or
+showing the effective command, else `EXTERNAL` from the device.
+
+Scope: a device change or a person's call is `lamp`; an automation's is `room`.
+
+### 8.4 Set, clear
+
+As 5.1 and 5.2, with: the id `manual` is reserved (set refuses it, clear accepts it);
+the manual priority is refused as a layer's priority; `mode: follow` is refused; `adjust`
+takes an `offset` and nothing else and needs a layer id; `hvac_mode: off` takes no
+target; `layer: active` edits a set layer only. A mode or preset the entity does not
+list is refused before anything changes.
+
+### 8.5 A change Layers did not make: the manual layer
+
+`apply_external(rec, shown, source, now, next_seq, manual_priority, manual_timeout, caps,
+user_id, scope)`, `shown` being what the entity reports (off carries no target):
+
+- soft layers at or above `manual_priority` (other than `manual`) are dropped and
+  tombstoned; sticky ones too when `scope` is `lamp`;
+- `manual` := `set` layer with `shown`, at `manual_priority`, `expires_at = now +
+  manual_timeout` (none for 0), `owner = source`, soft, `on_expire: safe`; its tombstone
+  is lifted;
+- sticky/locked layers above `manual_priority` are `held`: when the entity does not show
+  the effective command the record is `delivery` and the engine re-renders after
+  `HOLD_SETTLE_S`, capped as in 7.3 j;
+- the base is never changed; `owed` is cleared; `last_external.policy = manual_layer`;
+  `layers_external` fires with `edited: manual`.
+
+### 8.6 Expiry
+
+The safety rule is `starts(shown, effective)`: the effective command names a mode other
+than off and the entity shows off, unknown or unavailable (or nothing). Setpoints and
+presets never count. When layers expire: an `on_expire: render` layer (or one cleared
+after it ran out) renders; else a start sends nothing, with no exception for a layer
+still holding the mode: without a set layer naming a mode the base := what the entity
+shows (`expiry`), with one the record is `unsynced`; else render.
+
+### 8.7 Returns and startup
+
+As 6.4 and 7.4 with `starts` for "lights" and `close`/`matches` from 8.2. A changed
+return, or a layered entity found changed at the end of the grace, is a device change
+(8.5).
+

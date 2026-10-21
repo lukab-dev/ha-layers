@@ -4,6 +4,7 @@ set:
       domain:
         - light
         - switch
+        - climate
   fields:
     layer:
       required: true
@@ -110,6 +111,38 @@ set:
             - soft
             - sticky
             - locked
+    hvac_mode:
+      example: heat
+      selector:
+        select:
+          options:
+            - "off"
+            - heat
+            - cool
+            - heat_cool
+            - auto
+            - dry
+            - fan_only
+    temperature:
+      example: 20.5
+      selector:
+        number:
+          min: -50
+          max: 100
+          step: 0.1
+          mode: box
+    preset_mode:
+      example: eco
+      selector:
+        text:
+    offset:
+      example: -2
+      selector:
+        number:
+          min: -30
+          max: 30
+          step: 0.5
+          mode: box
 
 clear:
   target:
@@ -117,6 +150,7 @@ clear:
       domain:
         - light
         - switch
+        - climate
   fields:
     layer:
       required: true
@@ -138,6 +172,7 @@ sync:
       domain:
         - light
         - switch
+        - climate
 
 get:
   target:
@@ -145,3 +180,4 @@ get:
       domain:
         - light
         - switch
+        - climate

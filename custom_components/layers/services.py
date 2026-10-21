@@ -19,19 +19,24 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ATTR_HVAC_MODE,
     ATTR_LAYER,
     ATTR_MANUAL_TIMEOUT,
     ATTR_MODE,
+    ATTR_OFFSET,
     ATTR_ON_EXPIRE,
     ATTR_ONLY_IF_PRESENT,
     ATTR_OWNER,
+    ATTR_PRESET_MODE,
     ATTR_PRIORITY,
     ATTR_RESUME_AFTER_MANUAL,
     ATTR_SOURCE,
     ATTR_STATE,
     ATTR_STRENGTH,
+    ATTR_TEMPERATURE,
     ATTR_TTL,
     ATTR_UNTIL,
+    CLIMATE_DOMAIN,
     DOMAIN,
     LAYER_ID_PATTERN,
     OWNER_MAX_LEN,
@@ -42,6 +47,7 @@ from .const import (
     SERVICE_SET,
     SERVICE_SYNC,
 )
+from .logic.climate import HVAC_MODES, ClimateCommand, ClimateSetRequest
 from .logic.model import (
     LAYER_ACTIVE,
     LAYER_ALL,
@@ -69,6 +75,7 @@ if TYPE_CHECKING:
 ATTR_TRANSITION = "transition"
 _BRIGHTNESS = ("brightness", "brightness_pct")
 _COLORS = ("color_temp_kelvin", "xy_color", "hs_color", "rgb_color")
+_CLIMATE = (ATTR_HVAC_MODE, ATTR_TEMPERATURE, ATTR_PRESET_MODE, ATTR_OFFSET)
 _ID = re.compile(LAYER_ID_PATTERN)
 
 
@@ -101,12 +108,20 @@ def _pair(lo0: float, hi0: float, lo1: float, hi1: float) -> vol.All:
 def _cross_check(data: dict[str, Any]) -> dict[str, Any]:
     layer, mode = data[ATTR_LAYER], data[ATTR_MODE]
     attrs = [k for k in (*_BRIGHTNESS, *_COLORS) if k in data]
+    climate = [k for k in _CLIMATE if k in data]
     if layer in (LAYER_BASE, LAYER_ACTIVE):
         for key in (ATTR_PRIORITY, ATTR_TTL, ATTR_UNTIL, ATTR_STRENGTH):
             if key in data:
                 raise vol.Invalid(f"{key} does not apply to layer '{layer}'")
         if data[ATTR_ONLY_IF_PRESENT]:
             raise vol.Invalid(f"only_if_present does not apply to layer '{layer}'")
+    if mode == MODE_FOLLOW and climate:
+        raise vol.Invalid("a follow layer is for lights: drop hvac_mode, temperature, "
+                          "preset_mode and offset")
+    if ATTR_OFFSET in data and mode != MODE_ADJUST:
+        raise vol.Invalid("an offset needs mode: adjust")
+    if data.get(ATTR_HVAC_MODE) == "off" and (ATTR_TEMPERATURE in data or ATTR_PRESET_MODE in data):
+        raise vol.Invalid("hvac_mode: off takes no temperature or preset")
     if mode == MODE_FOLLOW:
         if layer in (LAYER_BASE, LAYER_ACTIVE):
             raise vol.Invalid(f"a follow layer needs a layer id, not '{layer}'")
@@ -124,11 +139,15 @@ def _cross_check(data: dict[str, Any]) -> dict[str, Any]:
     if mode == MODE_ADJUST:
         if ATTR_STATE in data:
             raise vol.Invalid("an adjust layer changes attributes only: drop 'state'")
-        if not attrs:
+        if set(climate) - {ATTR_OFFSET}:
+            raise vol.Invalid("an adjust layer on a climate entity takes an offset only")
+        if layer in (LAYER_BASE, LAYER_ACTIVE) and ATTR_OFFSET in data:
+            raise vol.Invalid(f"an offset belongs to a layer id, not to '{layer}'")
+        if not attrs and ATTR_OFFSET not in data:
             raise vol.Invalid("an adjust layer needs a brightness or a colour")
     if data.get(ATTR_STATE) == OFF and attrs:
         raise vol.Invalid("state: off takes no brightness or colour")
-    if mode == MODE_SET and ATTR_STATE not in data and not attrs:
+    if mode == MODE_SET and ATTR_STATE not in data and not attrs and not climate:
         raise vol.Invalid("give a state, a brightness or a colour")
     return data
 
@@ -158,6 +177,11 @@ SET_SCHEMA = vol.All(
             vol.Optional(ATTR_SOURCE): cv.entity_id,
             vol.Optional(ATTR_MANUAL_TIMEOUT): cv.positive_time_period,
             vol.Optional(ATTR_STRENGTH): vol.In(STRENGTHS),
+            # Climate entities (ignored by lamps, as brightness and colour are by thermostats).
+            vol.Optional(ATTR_HVAC_MODE): vol.All(cv.string, vol.Lower, vol.In(HVAC_MODES)),
+            vol.Optional(ATTR_TEMPERATURE): vol.All(vol.Coerce(float), vol.Range(-50, 100)),
+            vol.Optional(ATTR_PRESET_MODE): vol.All(cv.string, vol.Length(min=1, max=64)),
+            vol.Optional(ATTR_OFFSET): vol.All(vol.Coerce(float), vol.Range(-30, 30)),
         }
     ),
     _cross_check,
@@ -195,12 +219,47 @@ def _lamps(hass: HomeAssistant, engine: Engine, data: dict[str, Any], *, require
             raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_targets")
         return None
     if data.get(ATTR_ENTITY_ID) == ENTITY_MATCH_ALL:
-        return sorted(engine.records)
+        return sorted([*engine.records, *engine.climate.records])
     explicit, indirect = service_targets(hass, data)
-    lamps = sorted((explicit | (indirect & engine.enrolled)))
+    lamps = sorted(explicit | (indirect & engine.all_enrolled))
     if not lamps:
         raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_targets")
     return lamps
+
+
+def _split(entities: list[str] | None) -> tuple[list[str] | None, list[str] | None]:
+    """Targets as (lamps, thermostats); ``None`` stays "no target" for both."""
+    if entities is None:
+        return None, None
+    climate = [e for e in entities if e.split(".", 1)[0] == CLIMATE_DOMAIN]
+    return [e for e in entities if e not in climate], climate
+
+
+def _has_lamp_fields(data: dict[str, Any]) -> bool:
+    return ATTR_STATE in data or any(k in data for k in (*_BRIGHTNESS, *_COLORS)) or (
+        data[ATTR_MODE] == MODE_FOLLOW)
+
+
+def _nothing_for(kind: str, fields: str) -> ServiceValidationError:
+    return ServiceValidationError(
+        translation_domain=DOMAIN, translation_key="invalid_request",
+        translation_placeholders={"reason": f"the call targets {kind} but gives none of {fields}"},
+    )
+
+
+def _climate_request(data: dict[str, Any]) -> ClimateSetRequest:
+    return ClimateSetRequest(
+        layer=data[ATTR_LAYER],
+        command=ClimateCommand(data.get(ATTR_HVAC_MODE), data.get(ATTR_TEMPERATURE),
+                               data.get(ATTR_PRESET_MODE), data.get(ATTR_OFFSET)),
+        priority=data.get(ATTR_PRIORITY),
+        mode=data[ATTR_MODE],
+        expires_at=_expires_at(data),
+        on_expire=data[ATTR_ON_EXPIRE],
+        only_if_present=data[ATTR_ONLY_IF_PRESENT],
+        owner=data.get(ATTR_OWNER),
+        strength=data.get(ATTR_STRENGTH),
+    )
 
 
 def _command(data: dict[str, Any]) -> Command:
@@ -264,7 +323,29 @@ def _policy_error(err: PolicyError, req: SetRequest) -> ServiceValidationError:
 async def _async_set(call: ServiceCall) -> ServiceResponse:
     engine = _engine(call.hass)
     data = dict(call.data)
-    lamps = _lamps(call.hass, engine, data, required=True) or []
+    lamps, climates = _split(_lamps(call.hass, engine, data, required=True) or [])
+    if lamps and not _has_lamp_fields(data):
+        raise _nothing_for("lights or switches", "state, brightness, colour")
+    if climates and not any(k in data for k in _CLIMATE):
+        raise _nothing_for("climate entities", "hvac_mode, temperature, preset_mode, offset")
+    results: dict[str, str] = {}
+    if climates:
+        creq = _climate_request(data)
+        try:
+            engine.climate.validate_set(climates, creq)
+        except PolicyError as err:
+            raise _policy_error(err, creq) from err
+    if lamps:
+        results.update(_set_lamps(call, engine, data, lamps))
+    if climates:
+        results.update(engine.climate.set_layer(climates, creq, parent_id=call.context.id))
+        engine.save()
+        engine.notify()
+    return {"entities": results} if call.return_response else None
+
+
+def _set_lamps(call: ServiceCall, engine: Engine, data: dict[str, Any],
+               lamps: list[str]) -> dict[str, str]:
     req = SetRequest(
         layer=data[ATTR_LAYER],
         command=_command(data),
@@ -285,19 +366,27 @@ async def _async_set(call: ServiceCall) -> ServiceResponse:
         engine.validate_set(lamps, req)
     except PolicyError as err:
         raise _policy_error(err, req) from err
-    results = engine.set_layer(lamps, req, transition=data.get(ATTR_TRANSITION),
-                               parent_id=call.context.id)
-    return {"entities": results} if call.return_response else None
+    return engine.set_layer(lamps, req, transition=data.get(ATTR_TRANSITION),
+                            parent_id=call.context.id)
 
 
 async def _async_clear(call: ServiceCall) -> ServiceResponse:
     engine = _engine(call.hass)
     data = dict(call.data)
     # 'all' and 'active' mean something different on every lamp: they need a target.
-    lamps = _lamps(call.hass, engine, data, required=data[ATTR_LAYER] in (LAYER_ALL, LAYER_ACTIVE))
+    lamps, climates = _split(
+        _lamps(call.hass, engine, data, required=data[ATTR_LAYER] in (LAYER_ALL, LAYER_ACTIVE)))
     try:
-        results = engine.clear_layer(lamps, data[ATTR_LAYER], transition=data.get(ATTR_TRANSITION),
-                                     parent_id=call.context.id)
+        results: dict[str, str] = {}
+        if lamps is None or lamps:
+            results.update(engine.clear_layer(lamps, data[ATTR_LAYER],
+                                              transition=data.get(ATTR_TRANSITION),
+                                              parent_id=call.context.id))
+        if climates is None or climates:
+            results.update(engine.climate.clear_layer(climates, data[ATTR_LAYER],
+                                                      parent_id=call.context.id))
+            engine.save()
+            engine.notify()
     except PolicyError as err:
         raise ServiceValidationError(
             translation_domain=DOMAIN, translation_key="invalid_request",
@@ -309,8 +398,14 @@ async def _async_clear(call: ServiceCall) -> ServiceResponse:
 
 async def _async_sync(call: ServiceCall) -> ServiceResponse:
     engine = _engine(call.hass)
-    lamps = _lamps(call.hass, engine, dict(call.data), required=False)
-    results = engine.sync(lamps, parent_id=call.context.id)
+    lamps, climates = _split(_lamps(call.hass, engine, dict(call.data), required=False))
+    results: dict[str, str] = {}
+    if lamps is None or lamps:
+        results.update(engine.sync(lamps, parent_id=call.context.id))
+    if climates is None or climates:
+        results.update(engine.climate.sync(climates, parent_id=call.context.id))
+        engine.save()
+        engine.notify()
     return {"entities": results} if call.return_response else None
 
 

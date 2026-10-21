@@ -18,6 +18,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
@@ -25,20 +28,35 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     CONF_BASE_KEEP,
+    CONF_CLIMATE_MANUAL_PRIORITY,
+    CONF_CLIMATE_MANUAL_TIMEOUT,
+    CONF_CLIMATE_REPORT_WINDOW,
     CONF_DEFAULT_POLICY,
     CONF_EDIT_ACTIVE,
     CONF_ENTITIES,
     CONF_REASSERT,
     DOMAIN,
+    LAMP_DOMAINS,
     MANAGED_DOMAINS,
+)
+from .logic.climate import (
+    DEFAULT_MANUAL_PRIORITY,
+    DEFAULT_MANUAL_TIMEOUT_S,
+    DEFAULT_REPORT_WINDOW_S,
 )
 from .logic.model import DEFAULT_POLICIES, POLICY_TAKE_BACK
 
 GROUP_ATTRS = ("entity_id", "is_hue_group", "group_entities")
 
 
-def _lamps_selector() -> EntitySelector:
-    return EntitySelector(EntitySelectorConfig(domain=list(MANAGED_DOMAINS), multiple=True))
+def _lamps_selector(domains: frozenset[str] = MANAGED_DOMAINS) -> EntitySelector:
+    return EntitySelector(EntitySelectorConfig(domain=sorted(domains), multiple=True))
+
+
+def _number(low: float, high: float, step: float, unit: str) -> NumberSelector:
+    return NumberSelector(NumberSelectorConfig(min=low, max=high, step=step,
+                                               unit_of_measurement=unit,
+                                               mode=NumberSelectorMode.BOX))
 
 
 def _policy_selector() -> SelectSelector:
@@ -148,6 +166,12 @@ class LayersOptionsFlow(OptionsFlowWithReload):
                         CONF_EDIT_ACTIVE: edit,
                         CONF_BASE_KEEP: keep,
                         CONF_REASSERT: reassert,
+                        CONF_CLIMATE_MANUAL_PRIORITY: int(user_input.get(
+                            CONF_CLIMATE_MANUAL_PRIORITY, DEFAULT_MANUAL_PRIORITY)),
+                        CONF_CLIMATE_MANUAL_TIMEOUT: int(user_input.get(
+                            CONF_CLIMATE_MANUAL_TIMEOUT, DEFAULT_MANUAL_TIMEOUT_S / 60)),
+                        CONF_CLIMATE_REPORT_WINDOW: int(user_input.get(
+                            CONF_CLIMATE_REPORT_WINDOW, DEFAULT_REPORT_WINDOW_S)),
                     }
                 )
         current = user_input or options
@@ -157,9 +181,20 @@ class LayersOptionsFlow(OptionsFlowWithReload):
                 vol.Required(
                     CONF_DEFAULT_POLICY, default=current.get(CONF_DEFAULT_POLICY, POLICY_TAKE_BACK)
                 ): _policy_selector(),
-                vol.Optional(CONF_EDIT_ACTIVE, default=current.get(CONF_EDIT_ACTIVE, [])): _lamps_selector(),
-                vol.Optional(CONF_BASE_KEEP, default=current.get(CONF_BASE_KEEP, [])): _lamps_selector(),
-                vol.Optional(CONF_REASSERT, default=current.get(CONF_REASSERT, [])): _lamps_selector(),
+                vol.Optional(CONF_EDIT_ACTIVE, default=current.get(CONF_EDIT_ACTIVE, [])):
+                    _lamps_selector(LAMP_DOMAINS),
+                vol.Optional(CONF_BASE_KEEP, default=current.get(CONF_BASE_KEEP, [])):
+                    _lamps_selector(LAMP_DOMAINS),
+                vol.Optional(CONF_REASSERT, default=current.get(CONF_REASSERT, [])):
+                    _lamps_selector(LAMP_DOMAINS),
+                vol.Optional(CONF_CLIMATE_MANUAL_PRIORITY, default=current.get(
+                    CONF_CLIMATE_MANUAL_PRIORITY, DEFAULT_MANUAL_PRIORITY)): _number(1, 99, 1, ""),
+                vol.Optional(CONF_CLIMATE_MANUAL_TIMEOUT, default=current.get(
+                    CONF_CLIMATE_MANUAL_TIMEOUT, int(DEFAULT_MANUAL_TIMEOUT_S / 60))):
+                    _number(0, 7 * 24 * 60, 1, "min"),
+                vol.Optional(CONF_CLIMATE_REPORT_WINDOW, default=current.get(
+                    CONF_CLIMATE_REPORT_WINDOW, int(DEFAULT_REPORT_WINDOW_S))):
+                    _number(5, 600, 1, "s"),
             }
         )
         return self.async_show_form(

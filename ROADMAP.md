@@ -18,25 +18,39 @@ None right now.
 - **A "never brighten" cap for `adjust` layers**, so a dim layer can't make a light
   brighter than it already is.
 
-## Later: more than lights and switches
+## Thermostats: open questions
 
-Layers manages `light` and `switch` entities today. The same model fits other things
-that several automations fight over:
+Climate entities are managed since this pre-release. What is still open:
 
-- **Climate**: target temperature, HVAC mode, preset. An `adjust` layer would be an
-  offset ("2 °C lower while nobody is home").
+- **Two setpoints.** Thermostats in `heat_cool` with `target_temp_low`/`target_temp_high`
+  only get their mode and preset; a range layer needs its own answer for `adjust`.
+- **Fan, swing, humidity** are not layered.
+- **A thermostat that changes itself** (the vendor's open-window detection, its own
+  schedule) looks like a person and gets a manual layer. Telling those apart would need
+  a per-device source, like the lamps' **reassert** list.
+- **The manual layer is always on.** A thermostat has no "take it back" or "keep the
+  layers" choice yet, and one manual priority and timeout cover every thermostat.
+- **A person inside the report-back window.** Someone turning the dial in the first
+  seconds after Layers' own command, before the thermostat has shown it, is sent over
+  once (the same price lamps pay, for the same reason).
+- **An expiry that ends a manual "off".** The safety rule keeps the heating off when a
+  person's off runs out; only the next `layers.*` call, or `layers.sync`, turns it back
+  on. Whether a person's own hold should be allowed to end in heating is open.
+
+## Later: more domains
+
+The same model fits other things that several automations fight over:
+
 - **Covers**: position and tilt. Locked layers would fit wind and rain protection.
 - **Fans**: on/off, speed, preset.
 
-Each new domain needs its own answers before it can be built:
+Each new domain needs its own answers before it can be built, as climate did:
 
 - **What a layer holds**, and what `adjust` means for it.
-- **The expiry safety rule.** For lights, a timer running out never lights a dark room.
-  For heating, should an expiry never start heating? For covers, never open a blind?
-- **Telling a person from a slow device.** Thermostats and cloud integrations can report
-  back many seconds late, and covers take a long time to move. A late report must not look
-  like someone changing it by hand.
-- **Checking a command arrived**, when the device reports slowly or rounds values (a
-  setpoint of 21.3 °C that reads back as 21.5 °C).
+- **The expiry safety rule.** For lights, a timer running out never lights a dark room;
+  for thermostats, it never switches the heating on. For covers, never open a blind?
+- **Telling a person from a slow device.** Covers take a long time to move. A late report
+  must not look like someone changing it by hand.
+- **Checking a command arrived**, when the device reports slowly or rounds values.
 
-Climate is likely first. Tell us in an issue which domain you'd use.
+Tell us in an issue which domain you'd use.

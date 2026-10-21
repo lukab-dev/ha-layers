@@ -30,7 +30,15 @@
           "default_policy": "When someone changes a lamp by hand",
           "edit_active_entities": "Lamps where a manual change edits the active layer",
           "base_keep_layers_entities": "Lamps where a manual change keeps the layers",
-          "reassert_entities": "Entities where a change with no context is the device misbehaving: the layers are put back (a smart plug that comes back on by itself). App and automation changes still take it back; never for anything with a wall switch."
+          "reassert_entities": "Entities where a change with no context is the device misbehaving: the layers are put back (a smart plug that comes back on by itself). App and automation changes still take it back; never for anything with a wall switch.",
+          "climate_manual_priority": "Climate: priority of a person's change",
+          "climate_manual_timeout": "Climate: a person's change lasts (minutes)",
+          "climate_report_window": "Climate: report-back window (seconds)"
+        },
+        "data_description": {
+          "climate_manual_priority": "A change Layers did not make to a thermostat becomes the `manual` layer at this priority. Layers below it (holiday, away, night) stay underneath; soft layers at or above it are taken back; sticky and locked layers above it (an open window) keep showing, and the change comes back when they are cleared.",
+          "climate_manual_timeout": "After this long the manual layer runs out and the thermostat goes back to what is below it. 0: until it is cleared (`layers.clear layer: manual`).",
+          "climate_report_window": "How long after Layers' own command a thermostat may take to report it. A change with no context inside this window is the device answering late; outside it, it is a person."
         }
       }
     },
@@ -94,7 +102,7 @@
   "services": {
     "set": {
       "name": "Set layer",
-      "description": "Put a layer on lamps, update it, or change a lamp's base or active layer.",
+      "description": "Put a layer on lamps or thermostats, update it, or change their base or active layer.",
       "fields": {
         "layer": {
           "name": "Layer",
@@ -106,7 +114,7 @@
         },
         "mode": {
           "name": "Mode",
-          "description": "set decides on/off and its attributes; adjust only changes attributes of a lamp that is already on; follow is adjust with its brightness and colour read from a source entity."
+          "description": "set decides on/off (or the HVAC mode) and its attributes; adjust only changes attributes of a lamp that is already on, or shifts a thermostat's temperature by an offset; follow is adjust with its brightness and colour read from a source entity."
         },
         "state": {
           "name": "State",
@@ -154,7 +162,7 @@
         },
         "on_expire": {
           "name": "On expiry",
-          "description": "safe: an expiry may only turn the lamp off or dim it. render: it restores whatever is below, even if that turns the lamp on."
+          "description": "safe: an expiry may only turn the lamp off or dim it, and never turns a thermostat on. render: it restores whatever is below, even if that turns the lamp or the heating on."
         },
         "only_if_present": {
           "name": "Only if present",
@@ -175,6 +183,22 @@
         "strength": {
           "name": "Strength",
           "description": "What someone else's change does to this layer. soft (default): it takes the lamp back. sticky: a scene, a wall button or another automation goes underneath and the layer stays; changing this lamp itself removes it. locked: every change goes underneath; only clearing the layer (or turning Apply off) ends it."
+        },
+        "hvac_mode": {
+          "name": "HVAC mode",
+          "description": "Climate entities: off, heat, cool, heat_cool, auto, dry or fan_only. Left out, a layer keeps the mode below it."
+        },
+        "temperature": {
+          "name": "Temperature",
+          "description": "Climate entities: the target temperature, in the entity's unit. Rounded to the thermostat's step."
+        },
+        "preset_mode": {
+          "name": "Preset",
+          "description": "Climate entities: a preset the thermostat lists (eco, away, ...). A preset and a temperature replace both below them."
+        },
+        "offset": {
+          "name": "Offset",
+          "description": "Climate entities, mode: adjust only: added to the temperature below (-2 is two degrees lower), only while the thermostat is not off."
         }
       }
     },
@@ -198,7 +222,7 @@
     },
     "get": {
       "name": "Get layers",
-      "description": "Return each lamp's base, layers, effective command and status."
+      "description": "Return each lamp's or thermostat's base, layers, effective command and status."
     }
   }
 }
