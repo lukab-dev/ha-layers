@@ -254,6 +254,9 @@ class Engine:
         data = await self.store.async_load() or {}
         self.seq = int(data.get("seq", 0))
         self.apply = bool(data.get("apply", False))
+        if self.climate.load_apply(data):
+            _LOGGER.info("layers: a thermostat was newly enrolled; climate Apply is off")
+            self.save()
         stored: dict[str, Any] = data.get("entities", {})
         now = self.now()
         registry = er.async_get(self.hass)
@@ -568,6 +571,8 @@ class Engine:
         return {
             "seq": self.seq,
             "apply": self.apply,
+            "apply_climate": self.climate.apply_switch,
+            "climate_enrolled": sorted(self.climate.enrolled),
             "entities": {
                 eid: rec.to_json() for eid, rec in self.records.items() if rec.worth_persisting()
             },
@@ -1570,7 +1575,15 @@ class Engine:
                     rec.diverged = DIV_UNSYNCED
                     rec.owed = None
             self.renderer.cancel_all()
-        self.climate.on_apply(on)
+        self.climate.on_apply(self.climate.apply)
+        await self._save_now()
+        self.notify()
+
+    async def async_set_apply_climate(self, on: bool) -> None:
+        """switch.layers_apply_climate: thermostats only. Like Apply, turning it on
+        sends nothing by itself; layers.sync pushes."""
+        self.climate.apply_switch = on
+        self.climate.on_apply(self.climate.apply)
         await self._save_now()
         self.notify()
 
@@ -1597,6 +1610,7 @@ class Engine:
         attrs = {"failed": failed, "pending_since": pending,
                  "lamps": len(self.records),
                  "climate": len(self.climate.records),
+                 "climate_apply": self.climate.apply,
                  "layered": sorted([*(e for e, r in self.records.items() if r.layers),
                                     *climate["layered"]]),
                  "untrusted": sorted([*(e for e, r in self.records.items() if r.untrusted),

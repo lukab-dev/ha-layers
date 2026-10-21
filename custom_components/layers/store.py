@@ -13,7 +13,9 @@ from .const import STORAGE_KEY, STORAGE_MINOR_VERSION, STORAGE_VERSION
 class LayersStore(Store[dict[str, Any]]):
     """`.storage/layers.state`.
 
-    Layout: ``{"seq": int, "apply": bool, "entities": {entity_id: Record json}}``.
+    Layout: ``{"seq": int, "apply": bool, "apply_climate": bool,
+    "climate_enrolled": [entity_id], "entities": {entity_id: Record json},
+    "climate": {entity_id: ClimateRecord json}}``.
     Only records worth persisting are written (see ``Record.worth_persisting``);
     lamps with nothing layered keep their base in memory.
     """

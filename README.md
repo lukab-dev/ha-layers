@@ -356,10 +356,16 @@ differently from lamps:
   all, and then counts as failed on `sensor.layers_status`.
 - A report that only moves the room temperature or `hvac_action` is not a change.
 
-**Watch-only mode** works as for lamps. `layers.get` shows, per thermostat,
-`would_send`: the calls Layers would have made (`climate.set_hvac_mode`,
-`climate.set_preset_mode`, `climate.set_temperature`), and the decision trace in the
-diagnostics download records each one.
+**Thermostats have their own watch-only switch**, `switch.layers_apply_climate`. Layers
+sends a thermostat anything only while it **and** `switch.layers_apply` are on; lamps
+follow `switch.layers_apply` alone. It starts **off**, on a first install and again
+whenever a thermostat is added to the managed list, so you can watch what Layers would
+do with your heating for a while without stopping your lamps. While it is off, nothing
+reaches a thermostat: no layer, retry, expiry, return or `layers.sync`. `layers.get`
+shows, per thermostat, `would_send`: the calls Layers would make now
+(`climate.set_hvac_mode`, `climate.set_preset_mode`, `climate.set_temperature`, minus
+what it already shows), and the decision trace in the diagnostics download records each
+one. Turning it on sends nothing by itself: call `layers.sync` to push.
 
 **Not covered yet:** thermostats with two setpoints (`target_temp_low`/`high`), fan,
 swing and humidity. Features that make a thermostat change itself, such as the vendor's
@@ -387,6 +393,9 @@ for thermostats, `hvac_mode`, `temperature`, `preset_mode` and, with `mode: adju
 
 - **`switch.layers_apply`**: off means watch-only. Layers still keeps track of
   everything but sends nothing.
+- **`switch.layers_apply_climate`**: watch-only for thermostats alone (see
+  [Thermostats](#thermostats)). Off on a first install and whenever a thermostat is
+  newly managed.
 - **`sensor.layers_status`**: `ok`, `pending` (still delivering), `failed` or `shadow`
   (watch-only).
 

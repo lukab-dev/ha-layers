@@ -828,7 +828,7 @@ skipped and reported, never raised on.
 
 ### 7.7 Entities and diagnostics
 
-- `switch.layers_apply`; `sensor.layers_status` (`ok` / `pending` / `failed` /
+- `switch.layers_apply`; `switch.layers_apply_climate` (8.2); `sensor.layers_status` (`ok` / `pending` / `failed` /
   `shadow`, attributes: `pending_since` per lamp, `failed` lamps (a failed render
   whose lamp is still `delivery`), `untrusted` lamps; lamps unavailable for more
   than 24 h are ignored).
@@ -878,9 +878,20 @@ A render sends under one context, waits `SETTLE_S`, then polls until the entity 
 the command or the report-back window (`climate_report_window`, default 30 s) ends, and
 retries after `RETRY_BACKOFF_S` = (5, 30) s: three attempts, then `diverged: delivery`,
 a repair issue and `layers_render_failed`. Unavailable during a render: owed, as for
-lamps. Apply off (7.5): nothing is sent, the record is `unsynced`, `would_send` holds
-the calls (shown by `layers.get`) and a `shadow` decision records them; a lamp's
-`shadow` decision records its call too.
+lamps.
+
+**Climate Apply.** `switch.layers_apply_climate`, persisted in the Store
+(`apply_climate`, saved immediately) with the enrolled thermostats
+(`climate_enrolled`). A thermostat is commanded only while it and
+`switch.layers_apply` are both on (`ClimateManager.apply`); lamps follow
+`switch.layers_apply` alone. It is off on a fresh Store, and is turned off at load
+when a thermostat is enrolled that was not in `climate_enrolled`. While either is off
+the climate renderer starts nothing (every path goes through `_render`, and a running
+render's `render_wanted` turns false): the record is `unsynced`, `would_send` holds the
+calls a render would send now (those the entity does not already show, shown by
+`layers.get`) and a `shadow` decision records them; a lamp's `shadow` decision records
+its call too. Turning either off cancels climate renders and marks owed thermostats
+`unsynced` (7.5); turning it on sends nothing, `layers.sync` pushes.
 
 ### 8.3 Classifier
 

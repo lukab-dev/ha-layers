@@ -121,6 +121,11 @@ class ClimateManager:
         minutes = options.get(CONF_CLIMATE_MANUAL_TIMEOUT, cc.DEFAULT_MANUAL_TIMEOUT_S / 60)
         self.manual_timeout: float | None = float(minutes) * 60 if minutes else None
         self.window = float(options.get(CONF_CLIMATE_REPORT_WINDOW, cc.DEFAULT_REPORT_WINDOW_S))
+        # switch.layers_apply_climate: thermostats are commanded only while it AND the
+        # global Apply switch are on. Off on a first install and whenever a thermostat
+        # is newly enrolled, so a house whose lamps are live gets a watch-only week
+        # for its heating without stopping the lamps.
+        self.apply_switch = False
         self.renderer = ClimateRenderer(self)
         self._platforms: dict[str, str] = {}
         self._calls: dict[str, tuple[str, str | None, float]] = {}
@@ -132,6 +137,21 @@ class ClimateManager:
         self._reshows: dict[str, list[float]] = {}
 
     # ================================================================ lifecycle
+
+    @property
+    def apply(self) -> bool:
+        """Whether a thermostat may be sent anything: both Apply switches on."""
+        return self.engine.apply and self.apply_switch
+
+    def load_apply(self, data: dict[str, Any]) -> bool:
+        """Read the climate Apply switch; ``True`` when it was forced off because a
+        thermostat is enrolled that was not enrolled when it was last saved."""
+        self.apply_switch = bool(data.get("apply_climate", False))
+        known = set(data.get("climate_enrolled", []))
+        if self.apply_switch and self.enrolled - known:
+            self.apply_switch = False
+            return True
+        return False
 
     def load(self, stored: dict[str, Any], now: float) -> None:
         registry = er.async_get(self.hass)
@@ -550,13 +570,15 @@ class ClimateManager:
             rec.would_send = None
             self.engine.notify()
             return RESULT_IN_SYNC
-        if not self.engine.apply:
+        if not self.apply:
             # Shadow: record what would have been sent, and send nothing (SPEC 7.5).
             self.renderer.cancel(eid)
             rec.diverged = DIV_UNSYNCED
             rec.owed = None
-            rec.would_send = calls
-            self._decision(eid, "shadow", reason=reason, layer=active, calls=_calls_json(calls))
+            # What a render would really send: it skips what the thermostat already shows.
+            rec.would_send = tuple(c for c in calls if not cc.call_shown(rec.observed, c, caps))
+            self._decision(eid, "shadow", reason=reason, layer=active,
+                           calls=_calls_json(rec.would_send))
             self.engine.notify()
             return RESULT_SHADOW
         rec.would_send = None
@@ -578,7 +600,7 @@ class ClimateManager:
 
     def render_wanted(self, job: ClimateJob) -> bool:
         rec = self.records.get(job.entity_id)
-        if rec is None or not self.engine.apply:
+        if rec is None or not self.apply:
             return False
         return cc.project(cc.resolve(rec, self.now())[0], self.caps(job.entity_id)) == job.calls
 

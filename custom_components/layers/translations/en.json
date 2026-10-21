@@ -62,6 +62,9 @@
     "switch": {
       "apply": {
         "name": "Apply"
+      },
+      "apply_climate": {
+        "name": "Apply climate"
       }
     },
     "sensor": {

@@ -33,7 +33,7 @@ def device_info(entry: LayersConfigEntry) -> DeviceInfo:
 async def async_setup_entry(
     hass: HomeAssistant, entry: LayersConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
-    async_add_entities([ApplySwitch(entry)])
+    async_add_entities([ApplySwitch(entry), ApplyClimateSwitch(entry)])
 
 
 class ApplySwitch(SwitchEntity):
@@ -64,3 +64,28 @@ class ApplySwitch(SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._engine.async_set_apply(False)
+
+
+class ApplyClimateSwitch(ApplySwitch):
+    """switch.layers_apply_climate: whether Layers sends commands to thermostats.
+
+    Thermostats are commanded only while this and Apply are both on; lamps follow
+    Apply alone. Off on a first install and whenever a thermostat is newly enrolled,
+    so the heating gets its own watch-only period while the lamps stay live.
+    """
+
+    _attr_translation_key = "apply_climate"
+
+    def __init__(self, entry: LayersConfigEntry) -> None:
+        super().__init__(entry)
+        self._attr_unique_id = f"{entry.entry_id}_apply_climate"
+
+    @property
+    def is_on(self) -> bool:
+        return self._engine.climate.apply_switch
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._engine.async_set_apply_climate(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._engine.async_set_apply_climate(False)

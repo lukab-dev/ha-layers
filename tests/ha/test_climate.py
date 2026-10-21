@@ -33,6 +33,7 @@ pytestmark = pytest.mark.freeze_time(tick=True)
 LIVING, OFFICE = "climate.zone_a", "climate.zone_b"
 LAMP = "light.lamp_a"
 STATUS = "sensor.layers_status"
+APPLY, APPLY_CLIMATE = "switch.layers_apply", "switch.layers_apply_climate"
 WINDOW_S = 1.0          # the report-back window in these tests (seconds)
 OPTIONS = {"climate_report_window": WINDOW_S, "climate_manual_priority": 80,
            "climate_manual_timeout": 180}
@@ -45,11 +46,14 @@ async def advance(hass: HomeAssistant, freezer: Any, seconds: float) -> None:
 
 
 async def start(hass: HomeAssistant, freezer: Any, entities: list[str], *, apply: bool = True,
-                **extra: Any) -> tuple[MockConfigEntry, Engine]:
+                apply_climate: bool | None = None, **extra: Any) -> tuple[MockConfigEntry, Engine]:
+    """``apply_climate`` defaults to ``apply``: most tests want thermostats commanded."""
     entry = await setup_layers(hass, entities, end_grace=False, apply=apply,
                                extra={**OPTIONS, **extra})
-    await advance(hass, freezer, RETURN_SETTLE_S + 0.5)
     engine: Engine = entry.runtime_data.engine
+    if apply if apply_climate is None else apply_climate:
+        await engine.async_set_apply_climate(True)
+    await advance(hass, freezer, RETURN_SETTLE_S + 0.5)
     assert not engine.in_grace
     return entry, engine
 
@@ -168,9 +172,9 @@ async def test_apply_off_records_the_commands_it_would_send(
     assert shadow and shadow[-1]["domain"] == "climate" and shadow[-1]["layer"] == "morning"
     assert shadow[-1]["calls"] == got["would_send"]
 
-    # Apply on, then sync: now it is sent.
-    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.layers_apply"},
-                                   blocking=True)
+    # Apply (both switches) on, then sync: now it is sent.
+    for switch in (APPLY, APPLY_CLIMATE):
+        await hass.services.async_call("switch", "turn_on", {"entity_id": switch}, blocking=True)
     await layers(hass, "sync", entity_id=OFFICE)
     await settle(hass)
     assert setpoint(hass, OFFICE) == ("heat", 21.0)
@@ -427,3 +431,122 @@ async def test_a_reload_mid_command_does_not_mistake_its_report_for_a_person(
     rec = entry.runtime_data.engine.climate.records[LIVING]
     assert "manual" not in rec.layers
     assert "night" in rec.layers and setpoint(hass) == ("heat", 18.0)
+
+
+
+# --------------------------------------------------------------------------- the climate Apply switch
+
+
+async def switch(hass: HomeAssistant, entity_id: str, on: bool) -> None:
+    await hass.services.async_call("switch", "turn_on" if on else "turn_off",
+                                   {"entity_id": entity_id}, blocking=True)
+    await hass.async_block_till_done()
+
+
+async def test_climate_apply_is_off_on_a_first_install_and_lamps_stay_live(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], thermostats: dict[str, FakeThermostat],
+    freezer: Any,
+) -> None:
+    """Apply is on (the lamps are live); the thermostats only watch."""
+    _entry, engine = await start(hass, freezer, [LAMP, LIVING], apply_climate=False)
+    assert hass.states.get(APPLY).state == "on"
+    assert hass.states.get(APPLY_CLIMATE).state == "off"
+    result = await layers(hass, "set", entity_id=[LAMP, LIVING], layer="away", priority=40,
+                          state="off", temperature=17)
+    await settle(hass)
+    assert result["entities"] == {LAMP: "queued", LIVING: "shadow"}
+    assert hass.states.get(LAMP).state == "off"
+    assert thermostats["a"].calls == []
+    got = (await layers(hass, "get", entity_id=LIVING))["entities"][LIVING]
+    assert got["would_send"] == [{"service": "climate.set_temperature", "temperature": 17.0}]
+    assert any(d["kind"] == "shadow" and d["entity_id"] == LIVING for d in engine.decisions)
+    status = hass.states.get(STATUS)
+    assert status.state == "ok" and status.attributes["climate_apply"] is False
+
+
+async def test_nothing_reaches_a_thermostat_while_climate_apply_is_off(
+    hass: HomeAssistant, thermostats: dict[str, FakeThermostat], freezer: Any
+) -> None:
+    """Not a sync, not an expiry, not a person's change going under a locked layer."""
+    _entry, engine = await start(hass, freezer, [LIVING], apply_climate=False)
+    zone = thermostats["a"]
+    await layers(hass, "set", entity_id=LIVING, layer="boost", priority=60, temperature=24,
+                 ttl=60)
+    await layers(hass, "set", entity_id=LIVING, layer="window", priority=90, hvac_mode="off",
+                 strength="locked")
+    assert (await layers(hass, "sync", entity_id=LIVING))["entities"] == {LIVING: "shadow"}
+    zone.push(target_temperature=23.0)          # someone at the dial: goes under the window
+    await advance(hass, freezer, 3.5)
+    assert "manual" in engine.climate.records[LIVING].layers
+    await advance(hass, freezer, 61)            # the boost runs out
+    await layers(hass, "clear", layer="window")
+    await settle(hass)
+    assert zone.calls == []
+    assert engine.climate.records[LIVING].owed is None
+
+
+async def test_turning_climate_apply_on_sends_nothing_until_sync(
+    hass: HomeAssistant, thermostats: dict[str, FakeThermostat], freezer: Any
+) -> None:
+    await start(hass, freezer, [LIVING], apply_climate=False)
+    await layers(hass, "set", entity_id=LIVING, layer="night", priority=30, temperature=18)
+    await switch(hass, APPLY_CLIMATE, True)
+    await settle(hass)
+    assert thermostats["a"].calls == []
+    await layers(hass, "sync", entity_id=LIVING)
+    await settle(hass)
+    assert setpoint(hass) == ("heat", 18.0)
+
+
+async def test_global_apply_off_stops_thermostats_too(
+    hass: HomeAssistant, thermostats: dict[str, FakeThermostat], freezer: Any
+) -> None:
+    _entry, _engine = await start(hass, freezer, [LIVING])
+    await switch(hass, APPLY, False)
+    assert hass.states.get(APPLY_CLIMATE).state == "on", "each switch keeps its own state"
+    result = await layers(hass, "set", entity_id=LIVING, layer="night", priority=30,
+                          temperature=18)
+    await settle(hass)
+    assert result["entities"] == {LIVING: "shadow"}
+    assert thermostats["a"].calls == []
+    await switch(hass, APPLY, True)
+    await layers(hass, "sync")
+    await settle(hass)
+    assert setpoint(hass) == ("heat", 18.0)
+
+
+async def test_climate_apply_off_cancels_a_render_in_flight(
+    hass: HomeAssistant, thermostats: dict[str, FakeThermostat], freezer: Any
+) -> None:
+    _entry, engine = await start(hass, freezer, [LIVING])
+    zone = thermostats["a"]
+    zone.ignore_commands = True
+    await layers(hass, "set", entity_id=LIVING, layer="night", priority=30, temperature=18)
+    await asyncio.sleep(0.05)
+    await switch(hass, APPLY_CLIMATE, False)
+    for _ in range(3):
+        await settle(hass, 1.5)
+    assert len(zone.calls) == 1, "a retry went out with climate Apply off"
+    rec = engine.climate.records[LIVING]
+    assert rec.diverged == "unsynced" and rec.owed is None
+
+
+async def test_climate_apply_persists_and_a_new_thermostat_turns_it_off(
+    hass: HomeAssistant, thermostats: dict[str, FakeThermostat], freezer: Any
+) -> None:
+    entry, _engine = await start(hass, freezer, [LIVING])
+    assert hass.states.get(APPLY_CLIMATE).state == "on"
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get(APPLY_CLIMATE).state == "on"
+    assert entry.runtime_data.engine.climate.apply
+
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, "entities": [LIVING, OFFICE]})
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get(APPLY_CLIMATE).state == "off"
+    assert hass.states.get(APPLY).state == "on"
+    assert await hass.config_entries.async_reload(entry.entry_id)    # and it stays off
+    await hass.async_block_till_done()
+    assert hass.states.get(APPLY_CLIMATE).state == "off"
