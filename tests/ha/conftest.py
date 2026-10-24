@@ -8,7 +8,8 @@ would skip exactly the behaviour Layers has to cope with.
 
 A ``FakeLamp`` can also misbehave the way real lamps do: report late, revert a
 command with no context seconds after acknowledging it (a vendor bridge), ignore
-commands, drop off the network, or desaturate hs/rgb colours.
+commands, drop off the network, desaturate hs/rgb colours, or fade on from its old
+level the way a Matter lamp does.
 
 Run separately from the pure logic tests:  pytest tests/ha
 """
@@ -57,6 +58,8 @@ from custom_components.layers.const import (
     CONF_REASSERT,
     DOMAIN,
 )
+
+FADE_STEP_S = 0.05      # between a fading lamp's reports (real time)
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +116,12 @@ class FakeLamp(LightEntity):
         self.revert_after: float | None = None  # revert on/off with no context after N seconds
         self.report_after: float | None = None  # take a command at once, report it N s later
         self.desaturate_hs = False            # the Matter hs trap
+        # Fade on like a Matter lamp: turned on from off with a brightness, it first
+        # reports "on" at its old level, then climbs to the target in this many reports
+        # FADE_STEP_S apart. A later command with a brightness stops the fade where it
+        # is (a new move-to-level); one without a brightness leaves it running.
+        self.fade_reports = 0
+        self._fade: list[asyncio.TimerHandle] = []
         self.calls: list[tuple[str, dict[str, Any], Context | None]] = []
 
     # -- commands
@@ -124,7 +133,11 @@ class FakeLamp(LightEntity):
         was_on = self._attr_is_on
         self._attr_is_on = True
         if ATTR_BRIGHTNESS in kwargs:
-            self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
+            self._stop_fade()
+            if self.fade_reports and not was_on:
+                self._fade_to(self._last_brightness, kwargs[ATTR_BRIGHTNESS])
+            else:
+                self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
             self._last_brightness = kwargs[ATTR_BRIGHTNESS]
         elif not was_on:
             self._attr_brightness = self._last_brightness
@@ -148,10 +161,27 @@ class FakeLamp(LightEntity):
         self.calls.append(("turn_off", dict(kwargs), self._context))
         if self.ignore_commands:
             return
+        self._stop_fade()
         was_on = self._attr_is_on
         self._attr_is_on = False
         self._report()
         self._maybe_revert(was_on)
+
+    def _fade_to(self, old: int, target: int) -> None:
+        self._attr_brightness = old
+
+        def _step(level: int) -> None:
+            self._attr_brightness = level
+            self.async_write_ha_state()
+
+        for i in range(1, self.fade_reports + 1):
+            level = round(old + (target - old) * i / self.fade_reports)
+            self._fade.append(self.hass.loop.call_later(FADE_STEP_S * i, _step, level))
+
+    def _stop_fade(self) -> None:
+        for handle in self._fade:
+            handle.cancel()
+        self._fade.clear()
 
     def _report(self) -> None:
         """Write the new state now, or ``report_after`` seconds later (it then shows

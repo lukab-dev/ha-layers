@@ -12,14 +12,15 @@ from typing import Any
 
 import pytest
 from freezegun.api import TickingDateTimeFactory
-from homeassistant.core import Context, HomeAssistant
+from homeassistant.core import Context, Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.layers.const import DOMAIN
-from custom_components.layers.logic.model import DEBOUNCE_S
+from custom_components.layers.logic.model import DEBOUNCE_S, FOLLOW_SETTLE_S
 
-from .conftest import FakeLamp, settle
+from .conftest import FADE_STEP_S, FakeLamp, settle
 from .test_behaviour import advance, start
 
 pytestmark = pytest.mark.freeze_time(tick=True)
@@ -74,7 +75,8 @@ async def test_it_never_turns_a_lamp_on(
 
 
 async def test_a_lamp_turned_on_by_hand_gets_the_follow_values(
-    hass: HomeAssistant, lights: dict[str, FakeLamp], hass_admin_user: MockUser
+    hass: HomeAssistant, lights: dict[str, FakeLamp], hass_admin_user: MockUser,
+    freezer: TickingDateTimeFactory,
 ) -> None:
     engine = await start(hass, ["light.lamp_c"])
     source(hass, 90, 2500)
@@ -84,6 +86,8 @@ async def test_a_lamp_turned_on_by_hand_gets_the_follow_values(
         blocking=True, context=Context(user_id=hass_admin_user.id),
     )
     await settle(hass)
+    assert shows(hass, "light.lamp_c") == ("on", 128, 2700)   # its power-on level, settling
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
     assert shows(hass, "light.lamp_c") == ("on", 90, 2500)
     rec = engine.records["light.lamp_c"]
     assert rec.layers["ambient"].manual == frozenset()
@@ -91,7 +95,8 @@ async def test_a_lamp_turned_on_by_hand_gets_the_follow_values(
 
 
 async def test_a_turn_on_that_names_a_brightness_keeps_it(
-    hass: HomeAssistant, lights: dict[str, FakeLamp], hass_admin_user: MockUser
+    hass: HomeAssistant, lights: dict[str, FakeLamp], hass_admin_user: MockUser,
+    freezer: TickingDateTimeFactory,
 ) -> None:
     engine = await start(hass, ["light.lamp_c"])
     source(hass, 90, 2500)
@@ -100,7 +105,7 @@ async def test_a_turn_on_that_names_a_brightness_keeps_it(
         "light", "turn_on", {"entity_id": "light.lamp_c", "brightness": 200},
         blocking=True, context=Context(user_id=hass_admin_user.id),
     )
-    await settle(hass)
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
     assert shows(hass, "light.lamp_c") == ("on", 200, 2500)
     assert engine.records["light.lamp_c"].layers["ambient"].manual == frozenset({"brightness"})
 
@@ -126,7 +131,8 @@ async def test_a_dimmer_takes_the_brightness_and_the_colour_keeps_following(
 
 
 async def test_off_gives_it_back(
-    hass: HomeAssistant, lights: dict[str, FakeLamp], hass_admin_user: MockUser
+    hass: HomeAssistant, lights: dict[str, FakeLamp], hass_admin_user: MockUser,
+    freezer: TickingDateTimeFactory,
 ) -> None:
     engine = await start(hass, [A])
     source(hass, 120, 2700)
@@ -142,7 +148,7 @@ async def test_off_gives_it_back(
     assert engine.records[A].layers["ambient"].manual == frozenset()
     await hass.services.async_call("light", "turn_on", {"entity_id": A},
                                    blocking=True, context=Context(user_id=hass_admin_user.id))
-    await settle(hass)
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
     assert shows(hass) == ("on", 120, 2700)
 
 
@@ -297,3 +303,60 @@ async def test_a_nightlight_without_a_colour_keeps_the_follow_colour(
     source(hass, 80, 3000)
     await settle(hass)
     assert shows(hass) == ("on", 10, 3000)
+
+
+async def test_a_fading_lamp_switched_on_by_a_scene_keeps_the_scene_brightness(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], freezer: TickingDateTimeFactory
+) -> None:
+    """A scene turns an off lamp on at 255. A Matter lamp first reports "on" at the
+    level it was last lit at, then climbs. Sending the follow colour on that first
+    report sent the base brightness with it, 26, which stopped the fade there and
+    left 26 as the base. The follow values wait for the change to settle."""
+    engine = await start(hass, ["light.lamp_c"])
+    lamp = lights["c"]
+    lamp._last_brightness = 26     # noqa: SLF001 — it was last lit low
+    lamp.fade_reports = 5
+    source(hass, 90, 2500)
+    await follow(hass, "light.lamp_c")
+
+    reports: list[int | None] = []
+
+    @callback
+    def _report(event: Event[EventStateChangedData]) -> None:
+        reports.append(event.data["new_state"].attributes.get("brightness"))
+
+    async_track_state_change_event(hass, "light.lamp_c", _report)
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": "light.lamp_c", "brightness": 255},
+        blocking=True, context=Context(),            # an automation running a scene
+    )
+    await settle(hass, (lamp.fade_reports + 2) * FADE_STEP_S)
+    assert reports[0] == 26 and reports[-1] == 255    # the old level first, then the fade
+    assert len(lamp.calls) == 1                       # nothing of ours yet
+
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
+    rec = engine.records["light.lamp_c"]
+    assert rec.base.brightness == 255
+    assert rec.layers["ambient"].manual == frozenset({"brightness"})
+    assert shows(hass, "light.lamp_c") == ("on", 255, 2500)
+    sent = [kwargs for service, kwargs, _ in lamp.calls[1:]]
+    assert sent and all(kwargs.get("brightness") == 255 for kwargs in sent)
+    assert sent[-1].get("color_temp_kelvin") == 2500
+
+
+async def test_a_lamp_switched_off_while_settling_gets_nothing(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], hass_admin_user: MockUser,
+    freezer: TickingDateTimeFactory,
+) -> None:
+    await start(hass, ["light.lamp_c"])
+    source(hass, 90, 2500)
+    await follow(hass, "light.lamp_c")
+    person = Context(user_id=hass_admin_user.id)
+    await hass.services.async_call("light", "turn_on", {"entity_id": "light.lamp_c"},
+                                   blocking=True, context=person)
+    await settle(hass)
+    await hass.services.async_call("light", "turn_off", {"entity_id": "light.lamp_c"},
+                                   blocking=True, context=Context(user_id=hass_admin_user.id))
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
+    assert hass.states.get("light.lamp_c").state == "off"
+    assert [service for service, _kwargs, _ctx in lights["c"].calls] == ["turn_on", "turn_off"]
