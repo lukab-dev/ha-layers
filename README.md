@@ -51,7 +51,7 @@ can go stale.
 
 Needs Home Assistant 2026.7 or newer.
 
-This is the `beta` branch: it describes the current pre-release (`0.4.0b1`). The stable
+This is the `beta` branch: it describes the current pre-release (`0.4.0b2`). The stable
 release and its README are on [`main`](https://github.com/lukab-dev/ha-layers). To try a
 pre-release, turn on beta versions for Layers in HACS.
 
