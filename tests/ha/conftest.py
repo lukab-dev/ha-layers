@@ -40,7 +40,8 @@ from homeassistant.components.climate import (
 )
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import Context, HomeAssistant
+from homeassistant.core import Context, HomeAssistant, callback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.setup import async_setup_component
 from homeassistant.util import color as color_util
 from pytest_homeassistant_custom_component.common import (
@@ -121,7 +122,13 @@ class FakeLamp(LightEntity):
         # FADE_STEP_S apart. A later command with a brightness stops the fade where it
         # is (a new move-to-level); one without a brightness leaves it running.
         self.fade_reports = 0
+        # ... and with fade_sparse, the way an IKEA Matter lamp does: the
+        # fade runs over the call's own transition, reports only in its first moments
+        # (fade_reports reports FADE_STEP_S apart, at the level reached by then), then
+        # goes quiet and reports once more when it arrives.
+        self.fade_sparse = False
         self._fade: list[asyncio.TimerHandle] = []
+        self._fade_unsubs: list[Any] = []
         self.calls: list[tuple[str, dict[str, Any], Context | None]] = []
 
     # -- commands
@@ -135,7 +142,8 @@ class FakeLamp(LightEntity):
         if ATTR_BRIGHTNESS in kwargs:
             self._stop_fade()
             if self.fade_reports and not was_on:
-                self._fade_to(self._last_brightness, kwargs[ATTR_BRIGHTNESS])
+                self._fade_to(self._last_brightness, kwargs[ATTR_BRIGHTNESS],
+                              kwargs.get(ATTR_TRANSITION))
             else:
                 self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
             self._last_brightness = kwargs[ATTR_BRIGHTNESS]
@@ -167,13 +175,23 @@ class FakeLamp(LightEntity):
         self._report()
         self._maybe_revert(was_on)
 
-    def _fade_to(self, old: int, target: int) -> None:
+    def _fade_to(self, old: int, target: int, transition: float | None = None) -> None:
         self._attr_brightness = old
 
         def _step(level: int) -> None:
             self._attr_brightness = level
             self.async_write_ha_state()
 
+        if self.fade_sparse and transition:
+            for i in range(1, self.fade_reports + 1):
+                level = round(old + (target - old) * FADE_STEP_S * i / transition)
+                self._fade.append(self.hass.loop.call_later(FADE_STEP_S * i, _step, level))
+            @callback
+            def _arrive(_now: Any) -> None:
+                _step(target)
+
+            self._fade_unsubs.append(async_call_later(self.hass, transition, _arrive))
+            return
         for i in range(1, self.fade_reports + 1):
             level = round(old + (target - old) * i / self.fade_reports)
             self._fade.append(self.hass.loop.call_later(FADE_STEP_S * i, _step, level))
@@ -182,6 +200,9 @@ class FakeLamp(LightEntity):
         for handle in self._fade:
             handle.cancel()
         self._fade.clear()
+        for unsub in self._fade_unsubs:
+            unsub()
+        self._fade_unsubs.clear()
 
     def _report(self) -> None:
         """Write the new state now, or ``report_after`` seconds later (it then shows

@@ -344,6 +344,42 @@ async def test_a_fading_lamp_switched_on_by_a_scene_keeps_the_scene_brightness(
     assert sent[-1].get("color_temp_kelvin") == 2500
 
 
+async def test_a_quiet_fading_lamp_keeps_the_scene_brightness_through_its_transition(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], freezer: TickingDateTimeFactory
+) -> None:
+    """An IKEA Matter lamp, turned on from off by a scene with transition 15, reported
+    three times in its first 0.26 s, then nothing for two seconds while it was still
+    fading. FOLLOW_SETTLE_S after the last report counted
+    that silence as settled and sent the follow values with the base brightness it had
+    learned so far, a level near the start of the fade, which stopped the fade there.
+    The follow values must wait for the transition the change asked for."""
+    engine = await start(hass, ["light.lamp_c"])
+    lamp = lights["c"]
+    lamp._last_brightness = 26     # noqa: SLF001 — it was last lit low
+    lamp.fade_reports = 2
+    lamp.fade_sparse = True
+    source(hass, 90, 2500)
+    await follow(hass, "light.lamp_c")
+
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": "light.lamp_c", "brightness": 255, "transition": 15},
+        blocking=True, context=Context(),            # a scene run by an automation
+    )
+    await settle(hass, (lamp.fade_reports + 2) * FADE_STEP_S)
+    assert len(lamp.calls) == 1                       # nothing of ours yet
+
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)  # quiet, but still fading
+    assert len(lamp.calls) == 1, f"sent mid-fade: {lamp.calls[1:]}"
+
+    await advance(hass, freezer, 15)                  # the fade arrives, then settles
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
+    rec = engine.records["light.lamp_c"]
+    assert rec.base.brightness == 255
+    assert shows(hass, "light.lamp_c") == ("on", 255, 2500)
+    sent = [kwargs for service, kwargs, _ in lamp.calls[1:]]
+    assert sent and all(kwargs.get("brightness", 255) == 255 for kwargs in sent)
+
+
 async def test_a_lamp_switched_off_while_settling_gets_nothing(
     hass: HomeAssistant, lights: dict[str, FakeLamp], hass_admin_user: MockUser,
     freezer: TickingDateTimeFactory,
