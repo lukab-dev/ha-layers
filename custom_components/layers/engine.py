@@ -227,6 +227,9 @@ class Engine:
         # (context id, service, intent, groups, lamps) -> (first, last) sighting. A retry
         # loop re-sends the same call; a script's next step under the same context does not.
         self._call_seen: dict[tuple[Any, ...], tuple[float, float]] = {}
+        # lamp -> when the transition of the latest turn_on Layers did not make runs out.
+        # A lamp that fades can go quiet mid-fade; its follow values wait for this.
+        self._fading_until: dict[str, float] = {}
         self._timers: dict[tuple[str, str], CALLBACK_TYPE] = {}
         self._ttl_unsub: CALLBACK_TYPE | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
@@ -938,6 +941,7 @@ class Engine:
         if not lamps:
             return
         now = self.now()
+        self._note_transition(lamps, service, event.data.get("service_data") or {}, now)
         source = SRC_USER if ctx.user_id else SRC_AUTOMATION
         key = (ctx.id, service, intent, groups, lamps)
         first, _last = self._call_seen.get(key, (now, now))
@@ -1119,7 +1123,38 @@ class Engine:
         old level back and stop the fade there. Each report of the change runs through
         here again (``_supersede`` cancels the wait first), so the wait restarts."""
         if self._follow_due(rec, now):
-            self._later("follow_on", rec.entity_id, FOLLOW_SETTLE_S, self._follow_settled)
+            self._later("follow_on", rec.entity_id, self._follow_wait(rec.entity_id, now),
+                        self._follow_settled)
+
+    def _note_transition(self, lamps: frozenset[str], service: str | None,
+                         data: dict[str, Any], now: float) -> None:
+        """A turn_on with a transition: its lamps are fading until it runs out."""
+        if service not in ("turn_on", "toggle"):
+            for lamp in lamps:
+                self._fading_until.pop(lamp, None)
+            return
+        try:
+            transition = float(data.get("transition") or 0)
+        except (TypeError, ValueError):
+            transition = 0.0
+        for lamp in lamps:
+            if transition > 0:
+                self._fading_until[lamp] = now + transition
+            else:
+                self._fading_until.pop(lamp, None)
+
+    def _follow_wait(self, eid: str, now: float) -> float:
+        """FOLLOW_SETTLE_S after the last report, and never before the transition the
+        change asked for has run out: a Matter lamp can report a few times at the start
+        of a 15 s fade and then nothing until it arrives (2026-11-08), and a render in
+        that silence sends the level it had reached and stops the fade there."""
+        until = self._fading_until.get(eid)
+        if until is None:
+            return FOLLOW_SETTLE_S
+        if until <= now:
+            self._fading_until.pop(eid, None)
+            return FOLLOW_SETTLE_S
+        return until - now + FOLLOW_SETTLE_S
 
     @callback
     def _follow_settled(self, eid: str) -> None:
@@ -1127,6 +1162,9 @@ class Engine:
         if rec is None:
             return
         now = self.now()
+        if (until := self._fading_until.get(eid)) is not None and until > now:
+            self._later("follow_on", eid, until - now + FOLLOW_SETTLE_S, self._follow_settled)
+            return
         if self._follow_due(rec, now):
             self._decision(eid, "follow_on")
             self._follow_render(rec, now)
