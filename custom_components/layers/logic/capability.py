@@ -11,6 +11,7 @@ SPEC section 4:
 - ``project`` turns an effective command into the call a lamp can take;
 - ``matches`` verifies a call against a report (``yes`` / ``no`` / ``colour_off``);
 - ``compared_groups`` says which attribute groups ``matches`` could check;
+- ``already_shows`` says whether a render would send a lamp anything new;
 - ``close`` compares two reports within tolerance;
 - ``raises_output`` answers the expiry safety rule's question;
 - ``kelvin_to_xy`` is the xy Home Assistant gives a colour temperature it emulates.
@@ -26,6 +27,7 @@ from typing import Any, Literal
 from .model import (
     COLOR_HS,
     COLOR_KELVIN,
+    COLOR_KEYS,
     COLOR_RGB,
     COLOR_XY,
     GROUP_BRIGHTNESS,
@@ -442,6 +444,32 @@ def compared_groups(obs: Observed | None, call: Call | None, caps: Caps) -> froz
     ):
         groups.add(GROUP_COLOR)
     return frozenset(groups)
+
+
+def _call_colour(call: Call) -> tuple[str, Any] | None:
+    data = dict(call.data)
+    for key in COLOR_KEYS:
+        if key in data:
+            return key, data[key]
+    return None
+
+
+def already_shows(obs: Observed | None, call: Call | None, caps: Caps,
+                  last: Command | None) -> bool:
+    """The lamp already shows ``call``: rendering it would send nothing new.
+
+    ``matches`` is ``yes``, and a colour it does not compare (hs, rgb, kelvin on
+    an ``rgbww`` lamp) is the one ``last``, the lamp's last command, gave it.
+    Without that second part a command that changes only such a colour is never
+    sent: the state and brightness already match, and the colour is not looked at.
+    """
+    if matches(obs, call, caps) != MATCH_YES:
+        return False
+    colour = _call_colour(call)
+    if colour is None or GROUP_COLOR in compared_groups(obs, call, caps):
+        return True
+    sent = project(last, caps)
+    return sent is not None and sent.service == call.service and _call_colour(sent) == colour
 
 
 def close(a: Observed | None, b: Observed | None) -> bool:

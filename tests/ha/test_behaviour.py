@@ -39,6 +39,7 @@ from homeassistant.components.logbook import (
 from homeassistant.const import EVENT_CALL_SERVICE
 from homeassistant.core import Context, Event, HomeAssistant, State, callback
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.util import color as color_util
 from pytest_homeassistant_custom_component.common import MockUser, async_capture_events
 
 from custom_components.layers import logbook as layers_logbook
@@ -844,6 +845,32 @@ async def test_xy_goes_to_an_xy_lamp_exactly_as_written(
     assert st.attributes["color_mode"] == "xy"
     assert tuple(st.attributes[ATTR_XY_COLOR]) == tuple(SIGNAL_XY)
     assert engine.records[A].diverged is None
+
+
+async def test_a_layer_that_changes_only_an_rgb_colour_is_sent(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], renders: list[Event],
+) -> None:
+    """rgb (and hs) are not compared on verification, so the lamp's report cannot say it
+    already shows a new one: a change of only that colour still has to go out."""
+    await start(hass, [A])
+    lamp = lights["a"]
+    await layers(hass, "set", entity_id=A, layer="signal", priority=70,
+                 rgb_color=[255, 0, 0], brightness=200)
+    await settle(hass)
+    assert await layers(hass, "set", entity_id=A, layer="signal", priority=70,
+                        rgb_color=[0, 0, 255], brightness=200) == {A: "queued"}
+    await settle(hass)
+
+    sent = sent_by_layers(lamp, renders)
+    assert len(sent) == 2
+    # Home Assistant hands an xy lamp the rgb colour as xy.
+    assert tuple(sent[-1][1][ATTR_XY_COLOR]) == color_util.color_RGB_to_xy(0, 0, 255)
+
+    # The same colour again is in sync: nothing new to send.
+    assert await layers(hass, "set", entity_id=A, layer="signal", priority=70,
+                        rgb_color=[0, 0, 255], brightness=200) == {A: "unchanged"}
+    await settle(hass)
+    assert len(sent_by_layers(lamp, renders)) == 2
 
 
 async def test_an_adjust_layer_over_an_off_lamp_leaves_it_off(

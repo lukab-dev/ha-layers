@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import IntFlag, StrEnum
 
 from layers_logic.capability import (
+    already_shows,
     caps_from_attrs,
     close,
     compared_groups,
@@ -437,6 +438,30 @@ def test_matches_hs_and_rgb_are_not_compared():
     assert matches(on(200, "hs", hs=(200.0, 10.0), xy=(0.2, 0.2)), turn_on(hs_color=(14.0, 100.0)), FULL) == "yes"
     assert matches(on(200, "xy", xy=(0.2, 0.2)), turn_on(rgb_color=(255, 0, 0)), FULL) == "yes"
     assert matches(on(200, "color_temp", kelvin=6500), turn_on(rgb_color=(255, 0, 0)), FULL) == "yes"
+
+
+def test_already_shows_needs_an_uncompared_colour_to_be_the_last_one_sent():
+    shown = on(200, "xy", xy=(0.7, 0.3))
+    blue = turn_on(brightness=200, rgb_color=(0, 0, 255))
+    red = Command("on", 200, Color("rgb_color", (255, 0, 0)))
+    assert already_shows(shown, blue, FULL, Command("on", 200, Color("rgb_color", (0, 0, 255))))
+    assert not already_shows(shown, blue, FULL, red)        # only the colour changed: send it
+    assert not already_shows(shown, blue, FULL, None)       # nothing known: send it
+    assert not already_shows(shown, turn_on(brightness=200, hs_color=(240.0, 100.0)), FULL,
+                             Command("on", 200, Color("hs_color", (0.0, 100.0))))
+    rgbww = on(200, "rgbww")
+    assert not already_shows(rgbww, turn_on(brightness=200, color_temp_kelvin=2700), RGBWW,
+                             Command("on", 200, Color.kelvin(4000)))
+
+
+def test_already_shows_is_matches_for_what_matches_compares():
+    assert already_shows(on(200, "xy", xy=(0.64, 0.33)), turn_on(brightness=200, xy_color=(0.64, 0.33)),
+                         FULL, None)
+    assert already_shows(on(104), turn_on(brightness=102), DIMMER, None)
+    assert not already_shows(on(200, "xy", xy=(0.2, 0.2)), turn_on(brightness=200, xy_color=(0.64, 0.33)),
+                             FULL, Command("on", 200, RED_XY))
+    assert not already_shows(Observed("off"), turn_on(brightness=200, rgb_color=(0, 0, 255)), FULL,
+                             Command("on", 200, Color("rgb_color", (0, 0, 255))))
 
 
 def test_matches_ignores_transition_and_unknown_services():
