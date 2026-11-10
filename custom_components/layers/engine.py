@@ -1718,6 +1718,10 @@ class Engine:
         self._learn_base(rec, now)
         caps = self.caps(eid)
         diverged = rec.diverged
+        # A scene says everything about the lamp: what it names is chosen, and what it
+        # leaves open is the follow layers' again, whatever an earlier scene or a hand
+        # took over. The same button gives the same room whatever was pressed before it.
+        pol.release_manual(rec, now, off=True)
         result = pol.apply_external(rec, command, groups, source, self.policy_for(eid), now,
                                     user_id, caps=caps, chosen=groups & _ATTRS, scope=SCOPE_ROOM)
         # apply_external judged a lamp that has already taken the change (a held layer

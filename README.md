@@ -282,7 +282,9 @@ target: {entity_id: scene.evening}
 ```
 
 The layers react exactly as they would to the scene itself (a soft layer is taken back,
-a sticky one stays, a follow layer stops following only what the scene names). But each
+a sticky one stays, a follow layer stops following only what the scene names), and a
+follow layer follows again whatever the scene leaves open, so the same button gives the
+same room whatever was pressed before it. But each
 managed light gets one command, already combining the scene with its layers: the scene's
 brightness with the follow colour, nothing at all under a sticky signal that covers it.
 Layers checks that command arrived and retries it, as it does for its own. Anything in

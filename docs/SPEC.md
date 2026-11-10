@@ -398,7 +398,10 @@ only what reaches the lamp, and when, differs.
   the command and its groups, exactly as for a member a scene skips (7.1).
 - **Passed on**, under the caller's context: members that are not enrolled, and
   enrolled members whose call has no known intent (`effect`, `white`,
-  `rgbw_color`, ...), to `scene.apply`; targeted scenes with no members Layers can
+  `rgbw_color`, ...), to `scene.apply`. An `effect` of `off` or `none` (what the scene
+  editor saves for a lamp that can do effects) is no intent of its own: the member is
+  routed, unless the lamp is running an effect right now, which only Home Assistant's
+  scene can switch off; targeted scenes with no members Layers can
   read (a vendor scene), to `scene.turn_on`. The listeners then see them as for any
   scene. A member whose state Home Assistant's scene would send nothing for is
   dropped.

@@ -108,7 +108,11 @@ The groups the scene names for that lamp, of `brightness` and `color`, and
 nothing else. This is what the direct path already uses for a call with a known
 intent (`_chosen`: "a call with a known intent: the groups it named"). Each follow
 layer stops following those until the lamp is seen off (or its
-`manual_timeout`), and keeps following the rest.
+`manual_timeout`), and follows the rest: also what an earlier scene or a hand had
+taken over. A scene says everything about the lamp, so `set_base` first releases
+every follow layer on it (as "seen off" does) and then applies what this scene
+names. Otherwise the same scene gives the follow colour from off, and the previous
+scene's colour when pressed after it.
 
 - A scene naming `brightness: 255` and no colour leaves the follow layer's colour
   following: the lamp gets 255 with the follow colour, in one command.

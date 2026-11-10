@@ -42,6 +42,14 @@ _UNKNOWN_INTENT = frozenset(
     {"brightness_step", "brightness_step_pct", "profile", "flash", "color_name", "white",
      "rgbw_color", "rgbww_color", "effect"}
 )
+# `effect` values that mean "no effect". A scene saved in the scene editor carries
+# `effect: "off"` for every lamp that can do effects; that is no intent of its own.
+NO_EFFECT = frozenset({"off", "none"})
+
+
+def names_no_effect(value: Any) -> bool:
+    """An ``effect`` field that asks for no effect (or is missing)."""
+    return value is None or str(value).strip().lower() in NO_EFFECT
 
 
 def _is_group(hass: HomeAssistant, entity_id: str, attrs: Mapping[str, Any]) -> bool:
@@ -135,7 +143,9 @@ def normalise_call(
     groups: frozenset[str] = frozenset()
     if service == "turn_off":
         intent, groups = Command(OFF), frozenset({GROUP_STATE})
-    elif service == "turn_on" and not (_UNKNOWN_INTENT & raw.keys()):
+    elif service == "turn_on" and not (
+        _UNKNOWN_INTENT & {key for key in raw if key != "effect" or not names_no_effect(raw[key])}
+    ):
         brightness = raw.get("brightness")
         if brightness is None and raw.get("brightness_pct") is not None:
             brightness = round(255 * float(raw["brightness_pct"]) / 100)

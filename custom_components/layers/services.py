@@ -73,7 +73,7 @@ from .logic.model import (
 )
 from .logic.policy import PolicyError
 from . import scenes
-from .targets import normalise_call, service_targets
+from .targets import names_no_effect, normalise_call, service_targets
 
 if TYPE_CHECKING:
     from .engine import Engine
@@ -403,6 +403,13 @@ def _scene_intent(hass: HomeAssistant, state: State) -> tuple[Command, frozenset
     if reproduced is None:
         return None
     service, data = reproduced
+    if "effect" in data and names_no_effect(data["effect"]):
+        # "No effect" is something Layers' command cannot say. On a lamp that is not
+        # running one there is nothing to say; a lamp that is goes to Home Assistant's
+        # scene, which switches the effect off.
+        live = hass.states.get(state.entity_id)
+        if live is not None and not names_no_effect(live.attributes.get("effect")):
+            return None
     _lamps, _via, intent, groups = normalise_call(
         hass, {ATTR_ENTITY_ID: state.entity_id, **data}, service, {state.entity_id}
     )

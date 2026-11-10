@@ -341,3 +341,45 @@ async def test_a_lamp_that_fades_on_gets_brightness_and_colour_in_one_command(
     assert engine.records[C].base.brightness == 255
     assert len(lamp.calls) == before + 1, lamp.calls[before + 1:]
     assert engine.records[C].owed is None and engine.records[C].diverged is None
+
+
+async def test_a_scene_gives_the_same_room_whatever_was_pressed_before(
+    hass: HomeAssistant, lights: dict[str, FakeLamp]
+) -> None:
+    """One scene names a colour, so the follow layer stops following it. The next scene
+    names only a brightness: the colour it leaves open is the follow layer's again.
+    Without that, the same button gave the follow colour from off and the earlier
+    scene's colour after it."""
+    engine = await start(hass, [C])
+    lamp = lights["c"]
+    hass.states.async_set(SOURCE, "on", {"color_temp_kelvin": 3000})
+    await follow(hass, C)
+
+    await set_base(hass, entities={C: {"state": "on", "brightness": 100, "color_temp_kelvin": 2500}})
+    assert shows(hass, C) == ("on", 100, 2500)
+    assert engine.records[C].layers["ambient"].manual == frozenset({"brightness", "color"})
+
+    before = len(lamp.calls)
+    await set_base(hass, entities={C: {"state": "on", "brightness": 255}})
+    assert shows(hass, C) == ("on", 255, 3000)
+    assert engine.records[C].layers["ambient"].manual == frozenset({"brightness"})
+    sent = [kwargs for _service, kwargs, _ctx in lamp.calls[before:]]
+    assert sent == [{"brightness": 255, "color_temp_kelvin": 3000}]
+
+
+async def test_a_member_saved_with_no_effect_goes_through_layers(
+    hass: HomeAssistant, lights: dict[str, FakeLamp]
+) -> None:
+    """The scene editor saves `effect: "off"` for a lamp that can do effects. That is
+    not an intent Layers cannot read: the lamp is routed like any other. A lamp that
+    is running an effect is passed on, so Home Assistant's scene switches it off."""
+    await start(hass, [A, B])
+    await scenes(hass, unused={D: {"state": "on"}})     # loads the scene services
+    wanted = {"state": "on", "brightness": 120, "effect": "off"}
+    result = await set_base(hass, entities={A: dict(wanted)})
+    assert A in result["entities"] and result["passed_on"] == []
+    assert brightness(hass, A) == 120
+
+    hass.states.async_set(B, "on", {**hass.states.get(B).attributes, "effect": "candle"})
+    result = await set_base(hass, entities={B: dict(wanted)})
+    assert result["passed_on"] == [B] and B not in result["entities"]
