@@ -745,19 +745,28 @@ Only:
     render, it is skipped while the lamp `matches` the command (section 4; tolerances
     `TOL_KELVIN` 100, `TOL_BRIGHTNESS` 5, `TOL_XY` 0.03), so a source that moves in
     small steps reaches the lamp in steps of about the tolerance, not on every
-    update. The layer's `command` always holds the latest values;
+    update. The layer's `command` always holds the latest values. Only the
+    brightness/colour the follow layers give is sent (plus a group the source just
+    stopped giving, which falls through to what is below), never the rest of the
+    effective command: a brightness in a call is a new move-to-level on a Matter
+    lamp, which stops a running fade and puts back whatever level the base holds.
+    While a render of the whole command is under way, the whole command goes;
 (i) after an external change on any path, a lamp that is on, has a live follow
     layer and does not show its effective command gets it: a lamp switched on by
     hand comes on at its power-on level, and the follow values it did not choose
     are sent. Never an on or off: the on/off is what the person just did. Sent
     `FOLLOW_SETTLE_S` (2 s) after the last report of the change, not on its first:
     every further report of it (its context, a `FOLLOW_UP`, a judged debounce)
-    restarts the wait, and the lamp is judged again when it ends. A lamp that
-    fades (Matter) first reports "on" at its old level, and the base learns the
-    level the change asked for only from the reports that follow; a render on the
-    first report would send the old level back with the follow colour and stop the
-    fade there. (Sending only the follow layer's groups would not do: the base
-    would keep the old level, and the next (h) sends the whole effective command.)
+    restarts the wait, and the lamp is judged again when it ends. Like (h) it
+    carries only what the follow layers give. A lamp that fades (Matter) first
+    reports "on" at its old level, then a few levels on its way, so the base does
+    not learn a brightness from those reports: while a `turn_on` that named a
+    brightness can still be running (its `transition`, then `FOLLOW_SETTLE_S`),
+    the base takes the brightness the call asked for. A later call that names no
+    brightness (a colour change) leaves that standing and does not end the fade.
+    When the time is up, a lamp that shows another level (it clamps, it rounds,
+    someone moved it) has that level recorded as its base (`asked_not_reached`
+    in the decision trace).
 (j) `HOLD_SETTLE_S` (2 s) after the last report of a change that went under a
     `sticky` or `locked` layer (5.3), the effective command, once: every further
     report of the change restarts the wait, so a scene's own command reaches the

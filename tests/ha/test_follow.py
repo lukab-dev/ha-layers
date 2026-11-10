@@ -340,7 +340,7 @@ async def test_a_fading_lamp_switched_on_by_a_scene_keeps_the_scene_brightness(
     assert rec.layers["ambient"].manual == frozenset({"brightness"})
     assert shows(hass, "light.lamp_c") == ("on", 255, 2500)
     sent = [kwargs for service, kwargs, _ in lamp.calls[1:]]
-    assert sent and all(kwargs.get("brightness") == 255 for kwargs in sent)
+    assert sent and all("brightness" not in kwargs for kwargs in sent)   # the colour alone
     assert sent[-1].get("color_temp_kelvin") == 2500
 
 
@@ -378,6 +378,72 @@ async def test_a_quiet_fading_lamp_keeps_the_scene_brightness_through_its_transi
     assert shows(hass, "light.lamp_c") == ("on", 255, 2500)
     sent = [kwargs for service, kwargs, _ in lamp.calls[1:]]
     assert sent and all(kwargs.get("brightness", 255) == 255 for kwargs in sent)
+
+
+async def test_a_colour_change_during_a_fade_does_not_dim_the_lamp(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], freezer: TickingDateTimeFactory
+) -> None:
+    """A lamp fading to 255 over 15 s got a colour-only call 3 s in. The colour call
+    named no brightness, so the base stopped learning it from the lamp's reports and
+    kept the level heard at the start of the fade; once the fade was over the follow
+    render sent that level and the lamp dropped from full to almost nothing. The base
+    takes the brightness the call asked for, not the level the lamp reports on its way."""
+    engine = await start(hass, ["light.lamp_c"])
+    lamp = lights["c"]
+    lamp._last_brightness = 2      # it was last lit very low
+    lamp.fade_reports = 2
+    lamp.fade_sparse = True
+    source(hass, 90, 2500)
+    await follow(hass, "light.lamp_c")
+
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": "light.lamp_c", "brightness": 255, "transition": 15},
+        blocking=True, context=Context(),
+    )
+    await settle(hass, (lamp.fade_reports + 2) * FADE_STEP_S)
+    rec = engine.records["light.lamp_c"]
+    assert rec.base.brightness == 255                 # asked for, though the lamp shows less
+    assert hass.states.get("light.lamp_c").attributes["brightness"] < 255
+
+    await advance(hass, freezer, 3)
+    await hass.services.async_call(
+        "light", "turn_on",
+        {"entity_id": "light.lamp_c", "color_temp_kelvin": 4000, "transition": 12},
+        blocking=True, context=Context(),
+    )
+    await advance(hass, freezer, 15)                  # both transitions run out
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
+    assert rec.base.brightness == 255
+    assert shows(hass, "light.lamp_c") == ("on", 255, 4000)
+    ours = [kwargs for _service, kwargs, _ctx in lamp.calls[2:]]
+    assert all("brightness" not in kwargs for kwargs in ours), ours
+
+
+async def test_the_follow_values_go_out_without_the_base_brightness(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], freezer: TickingDateTimeFactory
+) -> None:
+    """A follow layer that gives a colour sends the colour. A brightness in the same
+    call is a new move-to-level on a Matter lamp: it stops a fade, and it puts back
+    whatever level Layers believes in."""
+    await start(hass, ["light.lamp_c"])
+    lamp = lights["c"]
+    hass.states.async_set(SOURCE, "on", {"color_temp_kelvin": 2500})
+    await follow(hass, "light.lamp_c")
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": "light.lamp_c", "brightness": 200},
+        blocking=True, context=Context(),
+    )
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
+    assert shows(hass, "light.lamp_c") == ("on", 200, 2500)
+    before = len(lamp.calls)
+
+    hass.states.async_set(SOURCE, "on", {"color_temp_kelvin": 3000})
+    await settle(hass)
+    assert shows(hass, "light.lamp_c") == ("on", 200, 3000)
+    sent = [kwargs for _service, kwargs, _ctx in lamp.calls[1:]]
+    assert len(lamp.calls) > before
+    assert all("brightness" not in kwargs for kwargs in sent), sent
+    assert sent[-1]["color_temp_kelvin"] == 3000
 
 
 async def test_a_lamp_switched_off_while_settling_gets_nothing(

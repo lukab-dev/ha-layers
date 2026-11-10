@@ -75,6 +75,8 @@ from .logic.capability import (
 )
 from .logic.model import (
     CALL_MEMORY_S,
+    COLOR_KEYS,
+    Call,
     Caps,
     Command,
     DEBOUNCE_S,
@@ -110,6 +112,7 @@ from .logic.model import (
     SRC_USER,
     STARTUP_GRACE_S,
     SetRequest,
+    TOL_BRIGHTNESS,
 )
 from .logic.resolve import resolve, resolve_without_follow
 from .render import Renderer, RenderJob
@@ -184,6 +187,33 @@ def _chosen(call: cl.CallInfo | None, before: Observed | None, new: Observed | N
     return (cl.changed_groups(before, new) or frozenset()) & _ATTRS
 
 
+def _follow_groups(rec: Record, now: float) -> frozenset[str]:
+    """The brightness/colour the lamp's follow layers give it right now: what a layer's
+    source carries, less what a person took over."""
+    groups: set[str] = set()
+    for layer in _following(rec, now):
+        if layer.command.brightness is not None and GROUP_BRIGHTNESS not in layer.manual:
+            groups.add(GROUP_BRIGHTNESS)
+        if layer.command.color is not None and GROUP_COLOR not in layer.manual:
+            groups.add(GROUP_COLOR)
+    return frozenset(groups)
+
+
+def _restrict(call: Call | None, only: frozenset[str] | None) -> Call | None:
+    """``call`` with just the brightness/colour in ``only`` (``None``: all of it).
+
+    A follow render sends what the follow layers give and nothing else. A brightness
+    in a call is a new move-to-level on a Matter lamp: it stops a fade that is still
+    running, and it puts back whatever level the base holds."""
+    if call is None or only is None or call.service != "turn_on":
+        return call
+    return Call.make(call.service, {
+        key: value for key, value in call.as_dict().items()
+        if (key != GROUP_BRIGHTNESS or GROUP_BRIGHTNESS in only)
+        and (key not in COLOR_KEYS or GROUP_COLOR in only)
+    })
+
+
 def _on_off(obs: Observed | None) -> str | None:
     return obs.state if obs is not None and obs.state in (ON, OFF) else None
 
@@ -230,6 +260,10 @@ class Engine:
         # lamp -> when the transition of the latest turn_on Layers did not make runs out.
         # A lamp that fades can go quiet mid-fade; its follow values wait for this.
         self._fading_until: dict[str, float] = {}
+        # lamp -> (the brightness the latest call that named one asked for, until when
+        # the lamp's reports are still that call's fade). The base takes it from the
+        # call: on its way there the lamp reports an old level, then levels in between.
+        self._asked: dict[str, tuple[int, float]] = {}
         self._timers: dict[tuple[str, str], CALLBACK_TYPE] = {}
         self._ttl_unsub: CALLBACK_TYPE | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
@@ -668,6 +702,7 @@ class Engine:
                 rec.p_at_drop = rec.observed
             rec.available = False
             rec.observed = new
+            self._asked.pop(eid, None)
             self._cancel("debounce", eid)
             rec.observed_prev = None
             self._cancel("return", eid)
@@ -779,7 +814,7 @@ class Engine:
         ``scope``: how far the change reached (SPEC 6.5); worked out here unless a
         follow-up re-applies the one it had."""
         eid = rec.entity_id
-        shown = observed_to_command(new, caps) if new is not None else None
+        shown = self._as_asked(eid, observed_to_command(new, caps) if new is not None else None, now)
         call = verdict.call
         who = user_id if user_id else (call.user_id if call else None)
         if verdict.replay:
@@ -819,6 +854,65 @@ class Engine:
         self._schedule_ttl()
         self.save()
         self.notify()
+
+    def _note_asked(self, lamp: str, call: cl.CallInfo, transition: float, now: float) -> None:
+        """Remember the brightness a call asked of a lamp, for as long as the lamp can
+        still be on its way there (the call's transition, then FOLLOW_SETTLE_S). A call
+        that names none leaves it: a colour change does not end a fade. A lamp turned on
+        without one picks its own level, and an unknown intent may be anything."""
+        command = call.command
+        if call.service != "turn_on" or command is None or not command.is_on:
+            self._asked.pop(lamp, None)
+        elif GROUP_BRIGHTNESS in call.groups and command.brightness is not None:
+            self._asked[lamp] = (command.brightness, now + transition + FOLLOW_SETTLE_S)
+            self._later("asked", lamp, transition + FOLLOW_SETTLE_S, self._asked_over)
+        elif _on_off(self.records[lamp].observed) != ON:
+            self._asked.pop(lamp, None)
+
+    @callback
+    def _asked_over(self, eid: str) -> None:
+        """The call's fade has had its time. A lamp that settled somewhere else (it
+        clamps, it rounds, someone moved it meanwhile) shows its level now, and the
+        base takes that: the asked brightness only stands in while the lamp is on
+        its way."""
+        asked = self._asked.get(eid)
+        rec = self.records.get(eid)
+        if asked is None or rec is None:
+            return
+        brightness, until = asked
+        now = self.now()
+        if now < until:
+            self._later("asked", eid, until - now, self._asked_over)
+            return
+        del self._asked[eid]
+        obs, base = rec.observed, rec.base
+        if (
+            self.in_grace or not rec.available or obs is None or obs.state != ON
+            or obs.brightness is None or base is None or not base.is_on
+            or base.brightness != brightness        # something else set the base since
+            or abs(obs.brightness - brightness) <= TOL_BRIGHTNESS
+        ):
+            return
+        rec.base = Command(ON, obs.brightness, base.color)
+        self._decision(eid, "asked_not_reached", asked=brightness, shown=obs.brightness)
+        self.save()
+        self.notify()
+
+    def _as_asked(self, eid: str, shown: Command | None, now: float) -> Command | None:
+        """What the lamp shows, with the brightness its call asked for while it is still
+        getting there. A Matter lamp turned on from off reports "on" at its old level
+        first, then a few levels of the fade; recording those as the base, and sending
+        the base back, is what left a lamp dim after a scene asked it for 255."""
+        asked = self._asked.get(eid)
+        if asked is None:
+            return shown
+        brightness, until = asked
+        if now > until or shown is None or not shown.is_on:
+            del self._asked[eid]
+            return shown
+        if shown.brightness is None:
+            return shown
+        return Command(ON, brightness, shown.color)
 
     @callback
     def _settle_debounce(self, eid: str) -> None:
@@ -941,7 +1035,8 @@ class Engine:
         if not lamps:
             return
         now = self.now()
-        self._note_transition(lamps, service, event.data.get("service_data") or {}, now)
+        transition = self._note_transition(lamps, service, event.data.get("service_data") or {},
+                                           now, intent, groups)
         source = SRC_USER if ctx.user_id else SRC_AUTOMATION
         key = (ctx.id, service, intent, groups, lamps)
         first, _last = self._call_seen.get(key, (now, now))
@@ -952,6 +1047,8 @@ class Engine:
         self._calls[ctx.id] = call
         for lamp in via:
             self._room_calls[lamp] = call
+        for lamp in lamps:
+            self._note_asked(lamp, call, transition, now)
         changed = False
         try:
             for lamp in sorted(lamps):
@@ -1105,10 +1202,13 @@ class Engine:
         if not layers or all(layer.command == command for layer in layers):
             return False
         before = resolve(rec, now).command
+        gave = _follow_groups(rec, now)
         for layer in layers:
             layer.command = command
         if resolve(rec, now).command != before:
-            self._follow_render(rec, now)     # SPEC 7.3 h
+            # What the source gave before counts too: a group it stops giving (the
+            # source switched off) falls through to what is below, and that is sent.
+            self._follow_render(rec, now, gave | _follow_groups(rec, now))     # SPEC 7.3 h
         return True
 
     def _follow_after_external(self, rec: Record, now: float) -> None:
@@ -1127,21 +1227,34 @@ class Engine:
                         self._follow_settled)
 
     def _note_transition(self, lamps: frozenset[str], service: str | None,
-                         data: dict[str, Any], now: float) -> None:
-        """A turn_on with a transition: its lamps are fading until it runs out."""
+                         data: dict[str, Any], now: float, intent: Command | None = None,
+                         groups: frozenset[str] = frozenset()) -> float:
+        """A turn_on with a transition: its lamps are fading until it runs out. Returns
+        the transition. A turn_on that names no brightness, to a lamp that is on, does
+        not end a fade the lamp is in (a colour command leaves the level alone); its own
+        transition can only make the wait longer."""
         if service not in ("turn_on", "toggle"):
             for lamp in lamps:
                 self._fading_until.pop(lamp, None)
-            return
+            return 0.0
         try:
-            transition = float(data.get("transition") or 0)
+            transition = max(0.0, float(data.get("transition") or 0))
         except (TypeError, ValueError):
             transition = 0.0
+        keeps_level = (service == "turn_on" and intent is not None and intent.is_on
+                       and GROUP_BRIGHTNESS not in groups)
         for lamp in lamps:
+            rec = self.records.get(lamp)
+            if keeps_level and rec is not None and _on_off(rec.observed) == ON:
+                if transition > 0:
+                    self._fading_until[lamp] = max(self._fading_until.get(lamp, 0.0),
+                                                   now + transition)
+                continue
             if transition > 0:
                 self._fading_until[lamp] = now + transition
             else:
                 self._fading_until.pop(lamp, None)
+        return transition
 
     def _follow_wait(self, eid: str, now: float) -> float:
         """FOLLOW_SETTLE_S after the last report, and never before the transition the
@@ -1178,22 +1291,33 @@ class Engine:
         effective = resolve(rec, now).command
         if effective is None or not effective.is_on:
             return False
+        only = _follow_groups(rec, now)
+        if not only:
+            return False        # a person took over everything it would give
         caps = self.caps(rec.entity_id)
-        call = project(effective, caps)
+        call = _restrict(project(effective, caps), only)
         return call is not None and matches(obs, call, caps) != MATCH_YES
 
-    def _follow_render(self, rec: Record, now: float) -> None:
+    def _follow_render(self, rec: Record, now: float,
+                       only: frozenset[str] | None = None) -> None:
         """Send a lamp its follow values (SPEC 7.3 h and i): never during the startup
         grace and never to a lamp that is away (nothing is owed: the next update or
-        its return brings them)."""
+        its return brings them). Only the brightness/colour the follow layers give
+        goes out (``only``: those groups, when the caller knows better), never the
+        rest of the effective command: the base's brightness is not theirs to send."""
         eid = rec.entity_id
         if self.in_grace or not rec.available:
             return
         self._flush_debounce(eid)       # a person's pending change is judged first
         layers = _following(rec, now)
+        if only is None:
+            only = _follow_groups(rec, now)
+        if not only:
+            return
         transition = next((layer.transition for layer in layers if layer.transition is not None),
                           FOLLOW_TRANSITION_S)
-        self._render(eid, reason="follow", parent_id=None, transition=transition, deferred=True)
+        self._render(eid, reason="follow", parent_id=None, transition=transition, deferred=True,
+                     only=only)
 
     def _seen_off(self, rec: Record) -> None:
         """The lamp is off: tombstones that lift when off lift, and follow layers follow
@@ -1307,8 +1431,13 @@ class Engine:
     # ================================================================ rendering
 
     def _render(self, eid: str, *, reason: str, parent_id: str | None,
-                transition: float | None = None, deferred: bool = False) -> str:
-        """Hand the lamp its effective command. The ONLY place a command starts."""
+                transition: float | None = None, deferred: bool = False,
+                only: frozenset[str] | None = None) -> str:
+        """Hand the lamp its effective command. The ONLY place a command starts.
+
+        ``only``: send just these attribute groups of it (a follow render: what the
+        follow layers give). While a render of the whole command is under way the
+        whole command goes, so its brightness is not dropped half delivered."""
         rec = self.records[eid]
         if deferred and rec.untrusted:
             self.renderer.cancel(eid)
@@ -1329,6 +1458,9 @@ class Engine:
             self.notify()
             return RESULT_UNCHANGED
         job = self.renderer.job(eid)
+        if only is not None and job is not None:
+            only = None if job.only is None else only | job.only
+        call = _restrict(call, only)
         if (
             rec.observed is not None
             and rec.available
@@ -1340,7 +1472,8 @@ class Engine:
         ):
             self.renderer.cancel(eid)
             rec.owed = None
-            rec.diverged = None     # it shows its effective command: nothing diverges
+            if only is None:
+                rec.diverged = None     # it shows its effective command: nothing diverges
             self.notify()
             return RESULT_IN_SYNC
         if not self.apply:
@@ -1364,7 +1497,10 @@ class Engine:
             self._late_retried.discard(eid)  # a new command gets its own late re-check
         # Our newer command supersedes a room call: its members' later reports are ours.
         self._room_calls.pop(eid, None)
-        self.renderer.start(RenderJob(eid, effective, call, transition, parent_id, layer, owner, reason))
+        if call.service != "turn_on" or GROUP_BRIGHTNESS in dict(call.data):
+            self._asked.pop(eid, None)      # the lamp's level is ours to say now
+        self.renderer.start(RenderJob(eid, effective, call, transition, parent_id, layer, owner,
+                                      reason, only))
         return RESULT_QUEUED
 
     def render_wanted(self, job: RenderJob) -> bool:
@@ -1372,7 +1508,8 @@ class Engine:
         rec = self.records.get(job.entity_id)
         if rec is None or not self.apply:
             return False
-        return project(resolve(rec, self.now()).command, self.caps(job.entity_id)) == job.call
+        call = project(resolve(rec, self.now()).command, self.caps(job.entity_id))
+        return _restrict(call, job.only) == job.call
 
     def _drop_stale_render(self, eid: str) -> None:
         """The record changed without a render: stop one that sends something else now."""
@@ -1392,7 +1529,7 @@ class Engine:
         self._failed.add(eid)
         self.notify()
 
-    def late_recheck(self, eid: str, call: Any) -> None:
+    def late_recheck(self, eid: str, call: Any, only: frozenset[str] | None = None) -> None:
         """Re-send once if a vendor bridge reverted a verified command later on."""
         rec = self.records.get(eid)
         if rec is None or not rec.available or rec.observed is None or eid in self._late_retried:
@@ -1402,12 +1539,12 @@ class Engine:
         self._flush_debounce(eid)       # a person's pending change comes first
         caps = self.caps(eid)
         effective = resolve(rec, self.now()).command
-        if project(effective, caps) != call:
+        if _restrict(project(effective, caps), only) != call:
             return  # the lamp's command changed since; nothing to re-check
         if matches(rec.observed, call, caps) != MATCH_YES:
             self._late_retried.add(eid)
             self._decision(eid, "late_recheck_failed")
-            self._render(eid, reason="late_recheck", parent_id=None, deferred=True)
+            self._render(eid, reason="late_recheck", parent_id=None, deferred=True, only=only)
             self.save()
 
     # ================================================================ TTL

@@ -22,7 +22,7 @@ from pytest_homeassistant_custom_component.common import MockUser, async_capture
 
 from custom_components.layers import render as render_module
 from custom_components.layers.const import DOMAIN, EVENT_EXTERNAL, EVENT_RENDER, EVENT_RENDER_FAILED
-from custom_components.layers.logic.model import DIV_COLOUR, OFF_COMMAND, Owed, Record
+from custom_components.layers.logic.model import DIV_COLOUR, OFF_COMMAND, Owed, Record, FOLLOW_SETTLE_S
 
 from . import test_lifecycle as lc
 from .conftest import FakeLamp, settle, setup_layers
@@ -360,8 +360,13 @@ async def test_an_attribute_tail_after_a_persons_change_is_folded_in(
     await hass.async_block_till_done()
     rec = engine.records[A]
     assert kinds(engine, A)[-1] == "follow_up" and not engine._pending("debounce", A)  # noqa: SLF001
-    assert rec.base.brightness == 240 and rec.last_external.source == "user"
+    assert rec.last_external.source == "user"
     assert len(externals) == 1                       # the tail is no new take-back
+    # The call asked for 230: that stands in while the lamp can still be on its way,
+    # and what it settled at is the base once the call has had its time.
+    assert rec.base.brightness == 230
+    await settle(hass, FOLLOW_SETTLE_S + 0.3)
+    assert rec.base.brightness == 240 and kinds(engine, A)[-1] == "asked_not_reached"
 
 
 async def test_a_room_call_attributes_member_changes_to_its_caller(

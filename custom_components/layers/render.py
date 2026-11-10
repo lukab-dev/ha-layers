@@ -63,6 +63,7 @@ class RenderJob:
     layer: str                 # what decided the command ("base" or a layer id)
     owner: str | None
     reason: str                # set / clear / sync / expiry / return / retry / replay
+    only: frozenset[str] | None = None   # the attribute groups ``call`` was cut down to
 
 
 class Renderer:
@@ -234,7 +235,11 @@ class Renderer:
         if rec is None:
             return
         rec.owed = None
-        rec.diverged = DIV_COLOUR if colour_off else None
+        if colour_off:
+            rec.diverged = DIV_COLOUR
+        elif job.only is None or rec.diverged == DIV_COLOUR:
+            # A render of part of the command says nothing about the rest of it.
+            rec.diverged = None
         ir.async_delete_issue(self.hass, DOMAIN, f"render_failed_{job.entity_id}")
         self.engine.render_succeeded(job.entity_id)
         self.engine.save()
@@ -289,4 +294,4 @@ class Renderer:
         self._late.pop(job.entity_id, None)
         if self.alive(job.entity_id):
             return
-        self.engine.late_recheck(job.entity_id, job.call)
+        self.engine.late_recheck(job.entity_id, job.call, job.only)
