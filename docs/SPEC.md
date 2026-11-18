@@ -795,6 +795,11 @@ Only:
     stopped giving, which falls through to what is below), never the rest of the
     effective command: a brightness in a call is a new move-to-level on a Matter
     lamp, which stops a running fade and puts back whatever level the base holds.
+    Except on a platform in `FOLLOW_BRIGHTNESS_PLATFORMS` (`hue`): there the
+    effective brightness goes with it. Home Assistant's Hue integration remembers
+    a lamp's level at a `turn_off` with a transition and adds it to the next
+    `turn_on` that names no brightness, even after one that named a brightness
+    (core issue #188753), so a colour-only render put the lamp back to that level.
     While a render of the whole command is under way, the whole command goes;
 (i) after an external change on any path, a lamp that is on, has a live follow
     layer and does not show its effective command gets it: a lamp switched on by

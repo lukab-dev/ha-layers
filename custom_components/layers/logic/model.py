@@ -664,6 +664,13 @@ HOLD_CAP_WINDOW_S = 60.0
 SLOW_OFF_S = 15.0           # Hue can report an optimistic off and correct it ~10 s later
 LATE_RECHECK_S = 45.0       # second verification for platforms with late reversals
 LATE_WINDOW_S = {"hue": 60.0}   # no-context reversal after a command = failed delivery
+# A follow render to a lamp of these platforms also carries the effective brightness
+# (SPEC 7.3 h). Home Assistant's Hue integration remembers a lamp's brightness at a
+# turn_off with a transition and adds it to the next turn_on that names no brightness;
+# a turn_on that names one does not clear it (core issue #188753). A colour-only
+# follow render after a scene put the lamp back to its level at the last faded off.
+# Hue has no running fade for the brightness to stop (that is Matter).
+FOLLOW_BRIGHTNESS_PLATFORMS = frozenset({"hue"})
 # A lamp has ARRIVED at our command once it has shown the target this long without
 # reporting anything else. Measured from the lamp's own report, never from when the
 # command was sent: how late a lamp answers says nothing about who moved it. A lamp

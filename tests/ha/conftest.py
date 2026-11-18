@@ -127,6 +127,12 @@ class FakeLamp(LightEntity):
         # (fade_reports reports FADE_STEP_S apart, at the level reached by then), then
         # goes quiet and reports once more when it arrives.
         self.fade_sparse = False
+        # What Home Assistant's own Hue integration does (hue/v2/light.py, 2026.11.1;
+        # core issue #188753): a turn_off WITH a transition remembers the level, and the
+        # next turn_on WITHOUT a brightness gets that level added; a turn_on WITH one
+        # leaves it remembered.
+        self.hue_memory = False
+        self._hue_restore: int | None = None
         self._fade: list[asyncio.TimerHandle] = []
         self._fade_unsubs: list[Any] = []
         self.calls: list[tuple[str, dict[str, Any], Context | None]] = []
@@ -137,6 +143,9 @@ class FakeLamp(LightEntity):
         self.calls.append(("turn_on", dict(kwargs), self._context))
         if self.ignore_commands:
             return
+        if self.hue_memory and self._hue_restore and ATTR_BRIGHTNESS not in kwargs:
+            kwargs = {**kwargs, ATTR_BRIGHTNESS: self._hue_restore}
+            self._hue_restore = None
         was_on = self._attr_is_on
         self._attr_is_on = True
         if ATTR_BRIGHTNESS in kwargs:
@@ -169,6 +178,8 @@ class FakeLamp(LightEntity):
         self.calls.append(("turn_off", dict(kwargs), self._context))
         if self.ignore_commands:
             return
+        if self.hue_memory and kwargs.get(ATTR_TRANSITION) is not None:
+            self._hue_restore = self._last_brightness
         self._stop_fade()
         was_on = self._attr_is_on
         self._attr_is_on = False

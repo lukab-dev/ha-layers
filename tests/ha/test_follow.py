@@ -18,6 +18,7 @@ from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.layers.const import DOMAIN
+from custom_components.layers.engine import Engine
 from custom_components.layers.logic.model import DEBOUNCE_S, FOLLOW_SETTLE_S
 
 from .conftest import FADE_STEP_S, FakeLamp, settle
@@ -341,6 +342,61 @@ async def test_a_fading_lamp_switched_on_by_a_scene_keeps_the_scene_brightness(
     assert shows(hass, "light.lamp_c") == ("on", 255, 2500)
     sent = [kwargs for service, kwargs, _ in lamp.calls[1:]]
     assert sent and all("brightness" not in kwargs for kwargs in sent)   # the colour alone
+    assert sent[-1].get("color_temp_kelvin") == 2500
+
+
+async def _bright_after_a_faded_off(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], freezer: TickingDateTimeFactory,
+    platform: str,
+) -> tuple[Engine, FakeLamp]:
+    """A nightlight lit the lamp at 13 and faded it off; in the morning a scene turns
+    it on at 255; a source that gives only a colour temperature is followed."""
+    engine = await start(hass, ["light.lamp_c"])
+    engine._platforms["light.lamp_c"] = platform
+    lamp = lights["c"]
+    lamp.hue_memory = True
+    hass.states.async_set(SOURCE, "on", {"color_temp_kelvin": 2500})
+    await follow(hass, "light.lamp_c")
+    nightlight = {"brightness": 13, "color_temp_kelvin": 2202}
+    for service, data in (("turn_on", nightlight), ("turn_off", {"transition": 3})):
+        await hass.services.async_call("light", service, {"entity_id": "light.lamp_c", **data},
+                                       blocking=True, context=Context())
+        await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
+    assert hass.states.get("light.lamp_c").state == "off"
+    lamp.calls.clear()
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": "light.lamp_c", "brightness": 255},
+        blocking=True, context=Context(),            # an automation running a scene
+    )
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
+    await advance(hass, freezer, FOLLOW_SETTLE_S + 1)
+    return engine, lamp
+
+
+async def test_a_hue_lamp_keeps_the_scene_brightness_when_the_colour_follows(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], freezer: TickingDateTimeFactory
+) -> None:
+    """Home Assistant's Hue integration remembers a lamp's level at a faded off and
+    adds it to the next turn_on that names no brightness, even after a turn_on that
+    named one (core #188753). A colour-only follow render after the scene put the
+    lamp back to 13 (2026-11-18: two Hue spots stayed at 5 % for eight hours). On Hue
+    the follow render carries the effective brightness."""
+    engine, lamp = await _bright_after_a_faded_off(hass, lights, freezer, "hue")
+    assert shows(hass, "light.lamp_c") == ("on", 255, 2500)
+    assert engine.records["light.lamp_c"].base.brightness == 255
+    sent = [kwargs for service, kwargs, _ in lamp.calls[1:]]
+    assert sent and sent[-1].get("brightness") == 255
+    assert sent[-1].get("color_temp_kelvin") == 2500
+
+
+async def test_the_follow_colour_goes_alone_off_hue(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], freezer: TickingDateTimeFactory
+) -> None:
+    """Elsewhere the follow render stays colour only: on Matter a brightness is a new
+    move-to-level, which stops a running fade."""
+    _engine, lamp = await _bright_after_a_faded_off(hass, lights, freezer, "matter")
+    sent = [kwargs for service, kwargs, _ in lamp.calls[1:]]
+    assert sent and all("brightness" not in kwargs for kwargs in sent)
     assert sent[-1].get("color_temp_kelvin") == 2500
 
 

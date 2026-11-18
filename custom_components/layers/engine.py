@@ -84,6 +84,7 @@ from .logic.model import (
     DIV_MANUAL_KEEP,
     DIV_REPAIRED_BY_TARGETED_CALL,
     DIV_UNSYNCED,
+    FOLLOW_BRIGHTNESS_PLATFORMS,
     FOLLOW_SETTLE_S,
     GROUP_BRIGHTNESS,
     GROUP_COLOR,
@@ -1307,7 +1308,10 @@ class Engine:
         grace and never to a lamp that is away (nothing is owed: the next update or
         its return brings them). Only the brightness/colour the follow layers give
         goes out (``only``: those groups, when the caller knows better), never the
-        rest of the effective command: the base's brightness is not theirs to send."""
+        rest of the effective command: the base's brightness is not theirs to send.
+        Except on a platform that fills in a missing brightness itself
+        (``FOLLOW_BRIGHTNESS_PLATFORMS``, Hue): there the effective brightness goes
+        with the colour, so the lamp keeps the level it should show."""
         eid = rec.entity_id
         if self.in_grace or not rec.available:
             return
@@ -1317,6 +1321,8 @@ class Engine:
             only = _follow_groups(rec, now)
         if not only:
             return
+        if self.platform(eid) in FOLLOW_BRIGHTNESS_PLATFORMS:
+            only = only | {GROUP_BRIGHTNESS}
         transition = next((layer.transition for layer in layers if layer.transition is not None),
                           FOLLOW_TRANSITION_S)
         self._render(eid, reason="follow", parent_id=None, transition=transition, deferred=True,
