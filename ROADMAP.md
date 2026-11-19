@@ -17,6 +17,14 @@ None right now.
   the app, voice and other automations.
 - **A "never brighten" cap for `adjust` layers**, so a dim layer can't make a light
   brighter than it already is.
+- **A late retry for scenes that don't go through Layers.** `layers.set_base` checks that a
+  scene arrived. A plain `scene.turn_on`, or an automation's own change, is only watched: if
+  a bridge reverts a light shortly afterwards (some Hue bridges do, up to ~40 s later),
+  Layers reads that as a change at the device and takes it as the new base. Planned: one
+  late retry when a light reverts with no context shortly after a change Layers can
+  attribute, and `diverged: delivery` if that fails too. Afterwards the README will advise
+  against wrapping managed lights in a retry integration: two things retrying against each
+  other fight.
 
 ## Thermostats: open questions
 
