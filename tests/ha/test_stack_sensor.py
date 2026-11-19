@@ -190,3 +190,21 @@ async def test_a_lamp_and_a_thermostat_with_one_name_get_separate_sensors(
     await tc.start(hass, freezer, [A, "climate.lamp_a"])
     assert state(hass, SENSOR_A).attributes["entity_id"] == A
     assert state(hass, "sensor.layers_climate_lamp_a").attributes["entity_id"] == "climate.lamp_a"
+
+
+async def test_a_stack_sensor_reads_its_description_once_per_refresh(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = await start(hass, [A])
+    await settle(hass)
+    asked: list[list[str] | None] = []
+    describe = engine.describe
+
+    def counted(lamps: list[str] | None = None) -> dict[str, Any]:
+        asked.append(lamps)
+        return describe(lamps)
+
+    monkeypatch.setattr(engine, "describe", counted)
+    engine.notify()
+    await hass.async_block_till_done()
+    assert asked == [[A]]

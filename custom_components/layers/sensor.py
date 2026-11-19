@@ -100,6 +100,8 @@ class StackSensor(SensorEntity):
         self._engine: Engine = entry.runtime_data.engine
         self._target = target
         self._target_entry = target_entry
+        # Read once per refresh: the state and the attributes are written together.
+        self._description: dict[str, Any] | None = None
         # The target's registry id survives a rename; its entity id does not.
         key = target_entry.id if target_entry is not None else target
         self._attr_unique_id = f"{entry.entry_id}{STACK_ID_PART}{key}"
@@ -113,10 +115,12 @@ class StackSensor(SensorEntity):
         self.entity_id = f"sensor.layers_{middle}{object_id}"
 
     async def async_added_to_hass(self) -> None:
+        self._description = self._describe()
         self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_UPDATE, self._refresh))
 
     @callback
     def _refresh(self) -> None:
+        self._description = self._describe()
         self.async_write_ha_state()
 
     @property
@@ -129,17 +133,17 @@ class StackSensor(SensorEntity):
             return named
         return split_entity_id(self._target)[1].replace("_", " ").capitalize()
 
-    def _described(self) -> dict[str, Any] | None:
+    def _describe(self) -> dict[str, Any] | None:
         return self._engine.describe([self._target]).get(self._target)
 
     @property
     def native_value(self) -> str | None:
-        described = self._described()
+        described = self._description
         return described["active"] if described else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        described = self._described()
+        described = self._description
         if described is None:
             return {"entity_id": self._target}
         attrs = {
