@@ -24,6 +24,7 @@ from .test_behaviour import A, B, automation, layers, start
 pytestmark = pytest.mark.freeze_time(tick=True)
 
 ROOM = "light.room_q"
+SOURCE = "sensor.follow_source"
 
 
 def only(user: MockUser, *entity_ids: str) -> Context:
@@ -114,6 +115,25 @@ async def test_an_automation_is_never_asked(
     assert set(await layers(hass, "sync", automation())) == {A, B}
     assert set(await layers(hass, "clear", automation(), layer="x")) == {A, B}
     assert stack(engine, A) == [] and set(await get(hass, automation())) == {A, B}
+
+
+async def test_a_follow_layer_needs_the_right_to_read_its_source(
+    hass: HomeAssistant, lights: dict[str, FakeLamp], hass_read_only_user: MockUser,
+) -> None:
+    """The lamps would show what the source reports: that is reading it."""
+    engine = await start(hass, [A])
+    hass.states.async_set(SOURCE, "on", {"brightness": 100})
+    theirs = only(hass_read_only_user, A)
+    with pytest.raises(Unauthorized):
+        await layers(hass, "set", theirs, entity_id=A, layer="f", priority=10,
+                     mode="follow", source=SOURCE)
+    assert stack(engine, A) == []
+
+    hass_read_only_user.mock_policy(
+        {"entities": {"entity_ids": {A: True, SOURCE: {"read": True}}}})
+    await layers(hass, "set", Context(user_id=hass_read_only_user.id), entity_id=A, layer="f",
+                 priority=10, mode="follow", source=SOURCE)
+    assert stack(engine, A) == ["f"]
 
 
 # --------------------------------------------------------------------------- targets

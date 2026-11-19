@@ -352,6 +352,11 @@ async def _async_set(call: ServiceCall) -> ServiceResponse:
     data = dict(call.data)
     targets = _lamps(call.hass, engine, data, required=True) or []
     await _check_allowed(call, _affected(engine, targets))
+    # A follow layer shows its source's brightness and colour on the lamps: reading
+    # the source through them needs the right to read it.
+    source = data.get(ATTR_SOURCE)
+    if source is not None and not (await _may(call, POLICY_READ))(source):
+        raise Unauthorized(context=call.context, entity_id=source, permission=POLICY_READ)
     lamps, climates = _split(targets)
     if lamps and not _has_lamp_fields(data):
         raise _nothing_for("lights or switches", "state, brightness, colour")
