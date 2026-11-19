@@ -8,11 +8,12 @@ that depends on a lamp's layers (priorities, tombstones) is decided per lamp.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 
-from homeassistant.auth.permissions.const import POLICY_CONTROL
+from homeassistant.auth.permissions.const import POLICY_CONTROL, POLICY_READ
 from homeassistant.const import ATTR_ENTITY_ID, ENTITY_MATCH_ALL
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, State, SupportsResponse
 from homeassistant.exceptions import ServiceValidationError, Unauthorized, UnknownUser
@@ -246,7 +247,7 @@ def _lamps(hass: HomeAssistant, engine: Engine, data: dict[str, Any], *, require
         return None
     if data.get(ATTR_ENTITY_ID) == ENTITY_MATCH_ALL:
         return sorted([*engine.records, *engine.climate.records])
-    explicit, indirect = service_targets(hass, data)
+    explicit, indirect = service_targets(hass, data, engine.all_enrolled)
     lamps = sorted(explicit | (indirect & engine.all_enrolled))
     if not lamps:
         raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_targets")
@@ -349,7 +350,9 @@ def _policy_error(err: PolicyError, req: SetRequest) -> ServiceValidationError:
 async def _async_set(call: ServiceCall) -> ServiceResponse:
     engine = _engine(call.hass)
     data = dict(call.data)
-    lamps, climates = _split(_lamps(call.hass, engine, data, required=True) or [])
+    targets = _lamps(call.hass, engine, data, required=True) or []
+    await _check_allowed(call, _affected(engine, targets))
+    lamps, climates = _split(targets)
     if lamps and not _has_lamp_fields(data):
         raise _nothing_for("lights or switches", "state, brightness, colour")
     if climates and not any(k in data for k in _CLIMATE):
@@ -416,19 +419,34 @@ def _scene_intent(hass: HomeAssistant, state: State) -> tuple[Command, frozenset
     return (intent, groups) if intent is not None else None
 
 
-async def _check_allowed(call: ServiceCall, entity_ids: list[str]) -> None:
-    """A person's set_base reaches only what Home Assistant would let them change
-    through the scene: each scene and each lamp Layers sends on their behalf."""
+async def _may(call: ServiceCall, permission: str) -> Callable[[str], bool]:
+    """A test for "this caller has ``permission`` on that entity". A call without a
+    user (an automation, a script, Home Assistant itself) and an admin may do anything."""
     if not call.context.user_id:
-        return
+        return lambda _eid: True
     user = await call.hass.auth.async_get_user(call.context.user_id)
     if user is None:
-        raise UnknownUser(context=call.context, permission=POLICY_CONTROL)
+        raise UnknownUser(context=call.context, permission=permission)
     if user.is_admin:
-        return
+        return lambda _eid: True
+    return lambda eid: user.permissions.check_entity(eid, permission)
+
+
+async def _check_allowed(call: ServiceCall, entity_ids: Iterable[str]) -> None:
+    """A person's call reaches only what Home Assistant would let them change
+    directly: every entity Layers changes or sends to on their behalf (for set_base,
+    each scene too). Refused as a whole, before anything is changed."""
+    allowed = await _may(call, POLICY_CONTROL)
     for eid in entity_ids:
-        if not user.permissions.check_entity(eid, POLICY_CONTROL):
+        if not allowed(eid):
             raise Unauthorized(context=call.context, entity_id=eid, permission=POLICY_CONTROL)
+
+
+def _affected(engine: Engine, entities: list[str] | None) -> list[str]:
+    """The enrolled entities a set, clear or sync acts on. No target is every enrolled
+    one; a named entity that is not enrolled is only reported, never changed."""
+    managed = engine.all_enrolled | set(engine.records) | set(engine.climate.records)
+    return sorted(managed) if entities is None else [e for e in entities if e in managed]
 
 
 async def _async_set_base(call: ServiceCall) -> ServiceResponse:
@@ -484,8 +502,10 @@ async def _async_clear(call: ServiceCall) -> ServiceResponse:
     engine = _engine(call.hass)
     data = dict(call.data)
     # 'all' and 'active' mean something different on every lamp: they need a target.
-    lamps, climates = _split(
-        _lamps(call.hass, engine, data, required=data[ATTR_LAYER] in (LAYER_ALL, LAYER_ACTIVE)))
+    targets = _lamps(call.hass, engine, data,
+                     required=data[ATTR_LAYER] in (LAYER_ALL, LAYER_ACTIVE))
+    await _check_allowed(call, _affected(engine, targets))
+    lamps, climates = _split(targets)
     try:
         results: dict[str, str] = {}
         if lamps is None or lamps:
@@ -508,7 +528,9 @@ async def _async_clear(call: ServiceCall) -> ServiceResponse:
 
 async def _async_sync(call: ServiceCall) -> ServiceResponse:
     engine = _engine(call.hass)
-    lamps, climates = _split(_lamps(call.hass, engine, dict(call.data), required=False))
+    targets = _lamps(call.hass, engine, dict(call.data), required=False)
+    await _check_allowed(call, _affected(engine, targets))
+    lamps, climates = _split(targets)
     results: dict[str, str] = {}
     if lamps is None or lamps:
         results.update(engine.sync(lamps, parent_id=call.context.id))
@@ -522,7 +544,10 @@ async def _async_sync(call: ServiceCall) -> ServiceResponse:
 async def _async_get(call: ServiceCall) -> ServiceResponse:
     engine = _engine(call.hass)
     lamps = _lamps(call.hass, engine, dict(call.data), required=False)
-    return {"apply": engine.apply, "entities": engine.describe(lamps)}
+    readable = await _may(call, POLICY_READ)
+    described = engine.describe(lamps)
+    return {"apply": engine.apply,
+            "entities": {eid: entry for eid, entry in described.items() if readable(eid)}}
 
 
 def async_register_services(hass: HomeAssistant) -> None:

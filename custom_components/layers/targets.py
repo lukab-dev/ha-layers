@@ -8,12 +8,13 @@ groups (it only expands entities that carry a ``group`` attribute and old-style
 ``group.*`` entities, which it is left to do here too, as the light service
 does), so light groups are expanded here, recursively, through their
 ``entity_id`` attribute. Members without a state (a disabled integration's
-leftovers) are dropped.
+leftovers) are dropped, unless Layers manages them: an enrolled lamp whose state
+is gone for a moment (its integration is reloading) is still that lamp.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -65,24 +66,36 @@ def _is_vendor_group(hass: HomeAssistant, entity_id: str, attrs: Mapping[str, An
 
 
 def expand(
-    hass: HomeAssistant, entity_ids: Iterable[str]
+    hass: HomeAssistant, entity_ids: Iterable[str], enrolled: Collection[str] = (),
 ) -> tuple[set[str], set[str]]:
     """Expand light groups to member lamps.
 
     Returns ``(lamps, via_vendor_group)``: every member lamp reached, and the
-    subset reached through a vendor room/zone group.
+    subset reached through a vendor room/zone group. A lamp reached both directly
+    and through a vendor group is in both, whichever path is walked first.
+
+    ``enrolled`` are the entities Layers manages. One of them stays a lamp while it
+    has no state (its integration is reloading): Layers still holds its record, and
+    what to send when it is back is the engine's to decide. Any other id without a
+    state is dropped, as before.
     """
     lamps: set[str] = set()
     via_vendor: set[str] = set()
-    seen: set[str] = set()
+    # Per (entity, reached through a vendor group): an entity is walked at most twice,
+    # so a cycle ends, and a direct visit cannot hide a later one through a vendor group.
+    seen: set[tuple[str, bool]] = set()
     stack: list[tuple[str, bool]] = [(e, False) for e in entity_ids]
     while stack:
         entity_id, vendor = stack.pop()
-        if entity_id in seen or entity_id.split(".", 1)[0] not in MANAGED_DOMAINS:
+        if (entity_id, vendor) in seen or entity_id.split(".", 1)[0] not in MANAGED_DOMAINS:
             continue
-        seen.add(entity_id)
+        seen.add((entity_id, vendor))
         state = hass.states.get(entity_id)
         if state is None:
+            if entity_id in enrolled:
+                lamps.add(entity_id)
+                if vendor:
+                    via_vendor.add(entity_id)
             continue
         attrs = state.attributes
         if _is_group(hass, entity_id, attrs):
@@ -96,7 +109,9 @@ def expand(
     return lamps, via_vendor
 
 
-def service_targets(hass: HomeAssistant, data: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+def service_targets(
+    hass: HomeAssistant, data: Mapping[str, Any], enrolled: Collection[str] = (),
+) -> tuple[set[str], set[str]]:
     """Lamps a layers.* call targets: ``(explicitly named, reached indirectly)``.
 
     Groups named explicitly count as explicit; lamps reached through an area,
@@ -105,8 +120,8 @@ def service_targets(hass: HomeAssistant, data: Mapping[str, Any]) -> tuple[set[s
     """
     selection = TargetSelection(dict(data))
     selected = async_extract_referenced_entity_ids(hass, selection, expand_group=True)
-    explicit, _ = expand(hass, selected.referenced)
-    indirect, _ = expand(hass, selected.indirectly_referenced)
+    explicit, _ = expand(hass, selected.referenced, enrolled)
+    indirect, _ = expand(hass, selected.indirectly_referenced, enrolled)
     return explicit, indirect - explicit
 
 

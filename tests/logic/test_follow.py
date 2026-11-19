@@ -315,3 +315,19 @@ def test_the_new_fields_survive_the_store_and_an_old_store_loads():
         del old[key]
     loaded = Layer.from_json(old)
     assert loaded.source is None and loaded.manual == frozenset()
+
+
+def test_follow_command_reads_a_number_that_is_not_finite_as_missing():
+    nan, inf = float("nan"), float("inf")
+    for bad in (nan, inf, -inf, "nan", "inf"):
+        assert follow_command("on", {"brightness_pct": bad}) == Command(None)
+        assert follow_command("on", {"brightness": bad}) == Command(None)
+        assert follow_command("on", {"color_temp_kelvin": bad}) == Command(None)
+        assert follow_command("on", {"xy_color": [bad, 0.3]}) == Command(None)
+        assert follow_command("on", {"hs_color": [30, bad]}) == Command(None)
+        assert follow_command("on", {"rgb_color": [255, bad, 0]}) == Command(None)
+    # A bad attribute does not take the good ones with it.
+    assert follow_command("on", {"brightness_pct": nan, "color_temp_kelvin": 2700}) == Command(
+        None, None, Color.kelvin(2700))
+    assert follow_command("on", {"brightness": 100, "xy_color": [nan, 0.3], "hs_color": [30, 60]}
+                          ) == Command(None, 100, Color("hs_color", (30.0, 60.0)))

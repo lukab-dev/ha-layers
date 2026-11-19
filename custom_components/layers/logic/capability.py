@@ -98,13 +98,18 @@ def _to_int(value: Any) -> int | None:
 
 
 def _to_float(value: Any) -> float | None:
-    """An attribute as a float, or ``None`` when missing or not a number."""
+    """An attribute as a float, or ``None`` when missing or not a finite number.
+
+    NaN and infinity are not values a lamp can show; a template that renders one is
+    read as "nothing reported", here, before any arithmetic meets it.
+    """
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _to_pair(value: Any) -> tuple[float, float] | None:
@@ -112,10 +117,10 @@ def _to_pair(value: Any) -> tuple[float, float] | None:
     if value is None or isinstance(value, str | bytes):
         return None
     try:
-        items = [float(v) for v in value]
-    except (TypeError, ValueError):
+        items = [_to_float(v) for v in value]
+    except TypeError:
         return None
-    if len(items) != 2:
+    if len(items) != 2 or items[0] is None or items[1] is None:
         return None
     return (items[0], items[1])
 
@@ -213,7 +218,9 @@ def _follow_colour(attrs: Mapping[str, Any]) -> Color | None:
             return Color(COLOR_HS, hs)
         rgb = attrs.get("rgb_color")
         if rgb is not None and len(rgb) == 3:
-            return Color(COLOR_RGB, tuple(float(v) for v in rgb))
+            channels = tuple(_to_float(v) for v in rgb)
+            if None not in channels:
+                return Color(COLOR_RGB, channels)
     except (TypeError, ValueError):
         return None
     return None
