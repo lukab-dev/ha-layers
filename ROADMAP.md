@@ -9,8 +9,8 @@ None right now.
 
 ## Next
 
-- **A sensor per light**, showing which layer is on top and the whole stack in its
-  attributes, for dashboard cards and for automations that need to check a light.
+- **A dashboard for the per-light and per-thermostat sensors**: a view to paste in that
+  draws each stack, lists what is pending or failed, and shows which layers are in use.
 - **Area and label targets** on `layers.*`. The code accepts them already; they need tests
   and documentation.
 - **Manual-change behaviour by source**: choose what happens separately for a wall switch,

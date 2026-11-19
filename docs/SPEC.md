@@ -902,6 +902,15 @@ Home Assistant's scene (5.6).
   `shadow`, attributes: `pending_since` per lamp, `failed` lamps (a failed render
   whose lamp is still `delivery`), `untrusted` lamps; lamps unavailable for more
   than 24 h are ignored).
+- One diagnostic sensor per enrolled lamp and thermostat, suggested id
+  `sensor.layers_<object id>` (a thermostat: `sensor.layers_climate_<object id>`),
+  unique id from the target's registry id (so it survives a rename). State: the
+  resolver's `active` (`<layer id>` / `base` / `none`). Attributes, none recorded
+  except `entity_id`: `entity_id`, `layers` (top first: `id`, `priority`, `mode`,
+  `strength`, `owner`, `command`, `source`, `set_at`, `expires_at`), `base`,
+  `effective`, `pending`, `diverged`, `target_available`, `untrusted`, `policy`,
+  `skipped` (tombstones), and on a thermostat `would_send`. An entity removed from
+  the options loses its sensor at the next setup.
 - Diagnostics: options, Store, in-flight renders, and a ring buffer of the last
   500 classifier decisions, with `user_id` and context ids redacted.
 - `layers_render`, `layers_render_failed`, `layers_external` events.

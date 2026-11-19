@@ -431,6 +431,25 @@ for thermostats, `hvac_mode`, `temperature`, `preset_mode` and, with `mode: adju
   newly managed.
 - **`sensor.layers_status`**: `ok`, `pending` (still delivering), `failed` or `shadow`
   (watch-only).
+- **One sensor per managed light and thermostat**: `sensor.layers_<name>` for a light or
+  switch (`light.sofa_lamp` gets `sensor.layers_sofa_lamp`) and
+  `sensor.layers_climate_<name>` for a thermostat (`climate.study` gets
+  `sensor.layers_climate_study`). Its state is the layer on top: a layer name, `base`
+  when nothing is layered, or `none` for the few seconds after a restart before Layers
+  has read the device. Its attributes hold the rest, for dashboard cards and for
+  automations that need to check a light:
+  - `entity_id`: the light or thermostat it describes.
+  - `layers`: the stack, top first, each with `id`, `priority`, `mode`, `strength`,
+    `owner`, `command`, `set_at` and `expires_at`.
+  - `base` and `effective`: how it was left, and what it should show now.
+  - `pending`, `diverged`, `target_available`, `untrusted`, `policy`, and `skipped`
+    (layers someone took back there).
+  - `would_send`, on a thermostat in watch-only mode: the commands Layers held back.
+
+  The history of the state shows which layer was on top when; the attributes are not
+  recorded. These sensors are diagnostic entities, so they stay off automatic
+  dashboards. If you rename a light, its sensor keeps its own id; `entity_id` in the
+  attributes always names the right one.
 
 The Activity log shows which layer changed a light, and on whose behalf.
 

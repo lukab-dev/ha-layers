@@ -16,6 +16,9 @@
           "failed": "mdi:layers-remove",
           "shadow": "mdi:layers-off-outline"
         }
+      },
+      "stack": {
+        "default": "mdi:layers-outline"
       }
     }
   },
